@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from worker.adapters.amex_xlsx import AmexXlsxAdapter
 from worker.adapters.base import AdapterError
 from worker.models import Direction, ParsedFile
+from worker.reconcile import reconcile_statement
 
 
 def test_detects_buried_amex_header_and_preserves_card_signs(amex_workbook_bytes) -> None:
@@ -33,6 +34,84 @@ def test_detects_buried_amex_header_and_preserves_card_signs(amex_workbook_bytes
     assert result.statement.closing_balance == Decimal("135.50")
     assert [row.amount_native for row in result.rows] == [Decimal("50.50"), Decimal("-15.00")]
     assert [row.direction for row in result.rows] == [Direction.DEBIT, Direction.PAYMENT]
+
+
+def test_parses_two_sheet_transaction_export_metadata_and_reconciles(
+    amex_transaction_export_bytes,
+) -> None:
+    content = amex_transaction_export_bytes(
+        period_start=date(2026, 6, 6),
+        period_end=date(2026, 7, 5),
+        opening=Decimal("2500.00"),
+        closing=Decimal("2855.59"),
+        transactions=[
+            (
+                date(2026, 6, 5),
+                date(2026, 6, 6),
+                "Synthetic Onboard Purchase",
+                Decimal("35.67"),
+                "USD 25.00",
+                "SAFE-1",
+            ),
+            (
+                date(2026, 7, 5),
+                date(2026, 7, 5),
+                "Synthetic Period Charge",
+                Decimal("319.92"),
+                None,
+                "SAFE-2",
+            ),
+        ],
+    )
+
+    result = AmexXlsxAdapter().parse(
+        ParsedFile(name="sanitized-transaction-export.xlsx", content=content)
+    )
+    reconciliation = reconcile_statement(result.statement, result.rows)
+
+    assert result.statement.period_start == date(2026, 6, 6)
+    assert result.statement.period_end == date(2026, 7, 5)
+    assert result.statement.opening_balance == Decimal("2500.00")
+    assert result.statement.closing_balance == Decimal("2855.59")
+    assert result.statement.account_ref_masked == "••••54321"
+    assert result.rows[0].booked_date == date(2026, 6, 5)
+    assert result.rows[0].posted_date == date(2026, 6, 6)
+    assert reconciliation.status == "ok"
+    assert reconciliation.calculated_closing == Decimal("2855.59")
+
+
+def test_accepts_extended_account_reference_on_same_row(
+    amex_transaction_export_bytes,
+) -> None:
+    content = amex_transaction_export_bytes(
+        period_start=date(2026, 6, 6),
+        period_end=date(2026, 7, 5),
+        opening=Decimal("0"),
+        closing=Decimal("1"),
+        transactions=[
+            (
+                date(2026, 7, 5),
+                date(2026, 7, 5),
+                "Synthetic Charge",
+                Decimal("1"),
+                None,
+                "SAME-ROW-1",
+            )
+        ],
+    )
+    workbook = load_workbook(BytesIO(content))
+    for sheet in workbook.worksheets:
+        sheet["B4"] = sheet["A5"].value
+        sheet["A5"] = None
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    result = AmexXlsxAdapter().parse(
+        ParsedFile(name="same-row-account-reference.xlsx", content=output.getvalue())
+    )
+
+    assert result.statement.account_ref_masked == "••••54321"
 
 
 @pytest.mark.parametrize(

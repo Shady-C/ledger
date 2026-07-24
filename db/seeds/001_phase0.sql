@@ -23,14 +23,13 @@ VALUES (
     'Amex Card',
     'credit_card',
     'CAD',
-    '••••0000'
+    NULL
 )
 ON CONFLICT (id) DO UPDATE
 SET institution_id = EXCLUDED.institution_id,
     display_name = EXCLUDED.display_name,
     kind = EXCLUDED.kind,
     native_currency = EXCLUDED.native_currency,
-    account_ref_masked = EXCLUDED.account_ref_masked,
     updated_at = now();
 
 INSERT INTO category (id, parent_id, name, kind)
@@ -69,8 +68,8 @@ VALUES
         '00000000-0000-4000-8000-00000000a001',
         '00000000-0000-4000-8000-000000000001',
         'xlsx',
-        '{"Date":"booked_date","Description":"description_raw","Amount":"amount_native","Foreign Spend Amount":"foreign_spend","Reference":"external_ref"}'::jsonb,
-        '{"required_headers":["Date","Description","Amount"],"optional_headers":["Foreign Spend Amount","Reference"],"header_scan_rows":20}'::jsonb,
+        '{"Date":"booked_date","Date Processed":"posted_date","Description":"description_raw","Amount":"amount_native","Foreign Spend Amount":"foreign_spend","Reference":"external_ref"}'::jsonb,
+        '{"required_headers":["Date","Description","Amount"],"optional_headers":["Date Processed","Foreign Spend Amount","Reference"],"header_scan_rows":20}'::jsonb,
         1
     ),
     (

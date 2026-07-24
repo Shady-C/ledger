@@ -3,6 +3,10 @@ from __future__ import annotations
 import logging
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
+
+import pytest
+from openpyxl import load_workbook
 
 from worker.models import AccountKind
 from worker.pipeline import IngestionPipeline, JobRunner
@@ -107,6 +111,138 @@ def test_repeat_ingestion_adds_zero_rows(amex_workbook_bytes) -> None:
     assert (first.added, first.skipped) == (2, 0)
     assert (second.added, second.skipped) == (0, 2)
     assert len(repository.transactions) == 2
+
+
+def test_same_source_reimport_refreshes_summary_metadata_without_duplicate_transactions(
+    amex_transaction_export_bytes,
+) -> None:
+    corrected = amex_transaction_export_bytes(
+        period_start=date(2026, 6, 6),
+        period_end=date(2026, 7, 5),
+        opening=Decimal("2500.00"),
+        closing=Decimal("2855.59"),
+        transactions=[
+            (
+                date(2026, 6, 5),
+                date(2026, 6, 6),
+                "Synthetic Onboard Purchase",
+                Decimal("35.67"),
+                None,
+                "REFRESH-1",
+            ),
+            (
+                date(2026, 7, 5),
+                date(2026, 7, 5),
+                "Synthetic Period Charge",
+                Decimal("319.92"),
+                None,
+                "REFRESH-2",
+            ),
+        ],
+    )
+    workbook = load_workbook(BytesIO(corrected))
+    del workbook["Transaction Summary"]
+    detail = workbook["Transaction Details"]
+    processed_column = next(
+        cell.column for cell in detail[7] if cell.value == "Date Processed"
+    )
+    for row_index in range(8, detail.max_row + 1):
+        detail.cell(row=row_index, column=processed_column).value = None
+    incomplete_output = BytesIO()
+    workbook.save(incomplete_output)
+    workbook.close()
+    incomplete = incomplete_output.getvalue()
+
+    key = "statements/same-source.xlsx"
+    repository = InMemoryRepository(account_refs={"account": "••••0000"})
+    first = IngestionPipeline(
+        store=MemoryObjectStore({key: incomplete}),
+        repository=repository,
+    ).process_file(account_id="account", file_key=key)
+    second = IngestionPipeline(
+        store=MemoryObjectStore({key: corrected}),
+        repository=repository,
+    ).process_file(account_id="account", file_key=key)
+    third = IngestionPipeline(
+        store=MemoryObjectStore({key: incomplete}),
+        repository=repository,
+    ).process_file(account_id="account", file_key=key)
+
+    statement = repository.statements[f"statement:account:{key}"]
+    assert (first.added, first.reconcile["status"]) == (2, "pending")
+    assert (second.added, second.skipped, second.reconcile["status"]) == (0, 2, "ok")
+    assert (third.added, third.skipped, third.reconcile["status"]) == (0, 2, "ok")
+    assert statement.metadata.opening_balance == Decimal("2500.00")
+    assert statement.metadata.closing_balance == Decimal("2855.59")
+    assert statement.status == "ok"
+    assert len(repository.transactions) == 2
+    assert {row.posted_date for row in repository.transactions.values()} == {
+        date(2026, 6, 6),
+        date(2026, 7, 5),
+    }
+    assert repository.account_refs["account"] == "••••54321"
+
+
+def test_statement_account_reference_conflict_fails_closed(
+    amex_transaction_export_bytes,
+) -> None:
+    content = amex_transaction_export_bytes(
+        period_start=date(2026, 6, 6),
+        period_end=date(2026, 7, 5),
+        opening=Decimal("0"),
+        closing=Decimal("1"),
+        transactions=[
+            (
+                date(2026, 6, 6),
+                date(2026, 6, 6),
+                "Synthetic Charge",
+                Decimal("1"),
+                None,
+                "ACCOUNT-1",
+            )
+        ],
+    )
+    for current_reference in ("••••99999", "••••94321"):
+        repository = InMemoryRepository(account_refs={"account": current_reference})
+        pipeline = IngestionPipeline(
+            store=MemoryObjectStore({"statement.xlsx": content}),
+            repository=repository,
+        )
+
+        with pytest.raises(ValueError, match="does not match selected account"):
+            pipeline.process_file(account_id="account", file_key="statement.xlsx")
+
+        assert repository.transactions == {}
+        assert repository.statements == {}
+
+
+def test_statement_account_reference_accepts_matching_last_four_digits(
+    amex_transaction_export_bytes,
+) -> None:
+    content = amex_transaction_export_bytes(
+        period_start=date(2026, 6, 6),
+        period_end=date(2026, 7, 5),
+        opening=Decimal("0"),
+        closing=Decimal("1"),
+        transactions=[
+            (
+                date(2026, 6, 6),
+                date(2026, 6, 6),
+                "Synthetic Charge",
+                Decimal("1"),
+                None,
+                "ACCOUNT-2",
+            )
+        ],
+    )
+    repository = InMemoryRepository(account_refs={"account": "••••4321"})
+
+    IngestionPipeline(
+        store=MemoryObjectStore({"statement.xlsx": content}),
+        repository=repository,
+    ).process_file(account_id="account", file_key="statement.xlsx")
+
+    assert repository.account_refs["account"] == "••••54321"
 
 
 def test_job_runner_claims_processes_and_completes_an_ingest_job(

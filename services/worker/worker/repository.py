@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -196,7 +197,12 @@ class PostgresRepository(LedgerRepository, JobRepository):
         if metadata.period_start is None or metadata.period_end is None:
             raise ValueError("statement period is required for persistence")
         with self._connect() as connection, connection.cursor() as cursor:
-            statement_id = self._get_or_create_statement(
+            self._sync_account_reference(
+                cursor,
+                account_id=account_id,
+                discovered=metadata.account_ref_masked,
+            )
+            statement_id, arithmetic_status = self._get_or_create_statement(
                 cursor,
                 account_id=account_id,
                 source_file_key=source_file_key,
@@ -242,12 +248,15 @@ class PostgresRepository(LedgerRepository, JobRepository):
                         Jsonb(row.enrichment),
                     ),
                 )
-                added += int(cursor.fetchone() is not None)
+                if cursor.fetchone() is not None:
+                    added += 1
+                else:
+                    self._refresh_transaction_metadata(cursor, row=row)
             reconcile_status, gaps = self._refresh_coverage(
                 cursor,
                 account_id=account_id,
                 current_statement_id=statement_id,
-                current_arithmetic_status=reconciliation.status,
+                current_arithmetic_status=arithmetic_status,
             )
         return PersistResult(
             statement_id=statement_id,
@@ -265,7 +274,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
         source_file_key: str,
         metadata: StatementMetadata,
         reconcile_status: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         cursor.execute(
             """
             INSERT INTO statement (
@@ -273,8 +282,29 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 closing_balance, currency, source_file_key, reconcile_status
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_id, source_file_key) DO UPDATE
-            SET updated_at = statement.updated_at
-            RETURNING id::text AS id
+            SET period_start = EXCLUDED.period_start,
+                period_end = EXCLUDED.period_end,
+                opening_balance = CASE
+                    WHEN EXCLUDED.opening_balance IS NULL
+                      OR EXCLUDED.closing_balance IS NULL
+                    THEN statement.opening_balance
+                    ELSE EXCLUDED.opening_balance
+                END,
+                closing_balance = CASE
+                    WHEN EXCLUDED.opening_balance IS NULL
+                      OR EXCLUDED.closing_balance IS NULL
+                    THEN statement.closing_balance
+                    ELSE EXCLUDED.closing_balance
+                END,
+                currency = EXCLUDED.currency,
+                reconcile_status = CASE
+                    WHEN EXCLUDED.opening_balance IS NULL
+                      OR EXCLUDED.closing_balance IS NULL
+                    THEN statement.reconcile_status
+                    ELSE EXCLUDED.reconcile_status
+                END,
+                updated_at = now()
+            RETURNING id::text AS id, reconcile_status
             """,
             (
                 account_id,
@@ -290,7 +320,58 @@ class PostgresRepository(LedgerRepository, JobRepository):
         created = cursor.fetchone()
         if created is None:
             raise RuntimeError("statement insert did not return an id")
-        return str(created["id"])
+        return str(created["id"]), str(created["reconcile_status"])
+
+    @staticmethod
+    def _sync_account_reference(
+        cursor: psycopg.Cursor[Any],
+        *,
+        account_id: str,
+        discovered: str | None,
+    ) -> None:
+        if discovered is None:
+            return
+        cursor.execute(
+            "SELECT account_ref_masked FROM account WHERE id = %s FOR UPDATE",
+            (account_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError("account does not exist")
+        raw_current = row["account_ref_masked"]
+        current = str(raw_current) if raw_current is not None else None
+        resolved = _resolve_account_reference(current, discovered)
+        if resolved != current:
+            cursor.execute(
+                "UPDATE account SET account_ref_masked = %s, updated_at = now() WHERE id = %s",
+                (resolved, account_id),
+            )
+
+    @staticmethod
+    def _refresh_transaction_metadata(
+        cursor: psycopg.Cursor[Any],
+        *,
+        row: CanonicalTransaction,
+    ) -> None:
+        """Fill parser metadata omitted by an older import without changing money truth."""
+
+        if row.posted_date is None:
+            return
+        cursor.execute(
+            "SELECT posted_date FROM txn WHERE dedup_hash = %s FOR UPDATE",
+            (row.dedup_hash,),
+        )
+        existing = cursor.fetchone()
+        if existing is None:
+            raise RuntimeError("conflicting transaction disappeared during metadata refresh")
+        posted_date = existing["posted_date"]
+        if posted_date is not None and posted_date != row.posted_date:
+            raise ValueError("statement processed date conflicts with an existing transaction")
+        if posted_date is None:
+            cursor.execute(
+                "UPDATE txn SET posted_date = %s, updated_at = now() WHERE dedup_hash = %s",
+                (row.posted_date, row.dedup_hash),
+            )
 
     @staticmethod
     def _category_id(cursor: psycopg.Cursor[Any], name: str, kind: str) -> str:
@@ -380,6 +461,7 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         jobs: list[Job] | None = None,
         *,
         account_kinds: dict[str, AccountKind] | None = None,
+        account_refs: dict[str, str | None] | None = None,
         default_account_kind: AccountKind = AccountKind.CREDIT_CARD,
     ) -> None:
         self.jobs = list(jobs or [])
@@ -389,6 +471,7 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         self.transactions: dict[str, CanonicalTransaction] = {}
         self.statements: dict[str, MemoryStatement] = {}
         self.account_kinds = dict(account_kinds or {})
+        self.account_refs = dict(account_refs or {})
         self.default_account_kind = default_account_kind
         self.heartbeat_count = 0
         self._inflight: dict[str, tuple[Job, datetime]] = {}
@@ -460,19 +543,47 @@ class InMemoryRepository(LedgerRepository, JobRepository):
     ) -> PersistResult:
         if metadata.period_start is None or metadata.period_end is None:
             raise ValueError("statement period is required for persistence")
+        self.account_refs[account_id] = _resolve_account_reference(
+            self.account_refs.get(account_id), metadata.account_ref_masked
+        )
         statement_id = f"statement:{account_id}:{source_file_key}"
+        existing_statement = self.statements.get(statement_id)
+        merged_metadata = metadata
+        effective_reconciliation = reconciliation
+        effective_status = reconciliation.status
+        if existing_statement is not None and (
+            metadata.opening_balance is None or metadata.closing_balance is None
+        ):
+            merged_metadata = metadata.model_copy(
+                update={
+                    "opening_balance": existing_statement.metadata.opening_balance,
+                    "closing_balance": existing_statement.metadata.closing_balance,
+                }
+            )
+            effective_reconciliation = existing_statement.reconciliation
+            effective_status = existing_statement.status
         self.statements[statement_id] = MemoryStatement(
             account_id=account_id,
-            metadata=metadata,
+            metadata=merged_metadata,
             period=StatementPeriod(metadata.period_start, metadata.period_end),
-            reconciliation=reconciliation,
-            status=reconciliation.status,
+            reconciliation=effective_reconciliation,
+            status=effective_status,
         )
         added = 0
         for row in rows:
-            if row.dedup_hash not in self.transactions:
+            existing = self.transactions.get(row.dedup_hash)
+            if existing is None:
                 self.transactions[row.dedup_hash] = row
                 added += 1
+            elif row.posted_date is not None:
+                if existing.posted_date is not None and existing.posted_date != row.posted_date:
+                    raise ValueError(
+                        "statement processed date conflicts with an existing transaction"
+                    )
+                if existing.posted_date is None:
+                    self.transactions[row.dedup_hash] = existing.model_copy(
+                        update={"posted_date": row.posted_date}
+                    )
         records = [
             (
                 existing_id,
@@ -492,6 +603,36 @@ class InMemoryRepository(LedgerRepository, JobRepository):
             statuses[statement_id],
             gaps,
         )
+
+
+def _resolve_account_reference(current: str | None, discovered: str | None) -> str | None:
+    if discovered is None:
+        return current
+    if current is None or _is_placeholder_account_reference(current):
+        return discovered
+    current_suffix = _account_reference_suffix(current)
+    discovered_suffix = _account_reference_suffix(discovered)
+    if current.strip().casefold() == discovered.strip().casefold():
+        return current
+    if current_suffix is not None and discovered_suffix is not None:
+        if current_suffix == discovered_suffix:
+            return current
+        if (
+            (len(current_suffix) == 4 or len(discovered_suffix) == 4)
+            and current_suffix[-4:] == discovered_suffix[-4:]
+        ):
+            return discovered if len(discovered_suffix) > len(current_suffix) else current
+    raise ValueError("statement account reference does not match selected account")
+
+
+def _is_placeholder_account_reference(value: str) -> bool:
+    suffix = _account_reference_suffix(value)
+    return suffix is not None and set(suffix) == {"0"}
+
+
+def _account_reference_suffix(value: str) -> str | None:
+    match = re.search(r"(\d{4,6})\s*$", value.strip())
+    return match.group(1) if match is not None else None
 
 
 def _account_coverage_statuses(
