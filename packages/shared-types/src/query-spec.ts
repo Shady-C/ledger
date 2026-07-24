@@ -48,7 +48,7 @@ export const jobQuerySchema = z
   .object({
     kind: z.preprocess(
       emptyStringToUndefined,
-      z.enum(['ingest', 'categorize', 'fx_refresh', 'base_currency_rebuild']).optional()
+      z.enum(['ingest', 'categorize', 'fx_refresh', 'base_currency_rebuild', 'analytics_refresh']).optional()
     ),
     status: z.preprocess(
       emptyStringToUndefined,

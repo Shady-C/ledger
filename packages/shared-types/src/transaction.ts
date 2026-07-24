@@ -17,14 +17,8 @@ export const transactionDirectionSchema = z.enum([
   'interest'
 ]);
 
-export const foreignSpendSchema = z.object({
-  amount: decimalStringSchema,
-  currency: currencyCodeSchema
-});
-
 export const transactionEnrichmentSchema = z
   .object({
-    foreign_spend: foreignSpendSchema.optional(),
     flags: z.array(z.string().max(80)).optional()
   })
   .passthrough();
@@ -43,9 +37,15 @@ export const transactionSchema = z.object({
   categoryConfidence: decimalStringSchema.nullable(),
   amountNative: decimalStringSchema,
   currencyNative: currencyCodeSchema,
-  amountBase: decimalStringSchema,
+  originalAmount: decimalStringSchema.nullable(),
+  originalCurrency: currencyCodeSchema.nullable(),
+  amountBase: decimalStringSchema.nullable(),
   currencyBase: currencyCodeSchema,
-  fxRate: decimalStringSchema,
+  fxRate: decimalStringSchema.nullable(),
+  fxRateDate: isoDateSchema.nullable(),
+  fxFeeAmountNative: decimalStringSchema.nullable(),
+  isFxFee: z.boolean(),
+  valuationStatus: z.enum(['valued', 'pending_fx']),
   direction: transactionDirectionSchema,
   runningBalance: decimalStringSchema,
   runningBalanceNative: decimalStringSchema,

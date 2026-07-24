@@ -7,7 +7,8 @@ export const jobKindSchema = z.enum([
   'ingest',
   'categorize',
   'fx_refresh',
-  'base_currency_rebuild'
+  'base_currency_rebuild',
+  'analytics_refresh'
 ]);
 export const jobIdSchema = uuidSchema;
 
@@ -90,7 +91,8 @@ export const categorizeJobResultSchema = z.object({
 export const fxRefreshJobResultSchema = z.object({
   baseCurrency: z.string().regex(/^[A-Z]{3}$/),
   quoteCurrencies: z.array(z.string().regex(/^[A-Z]{3}$/)),
-  ratesStored: z.number().int().nonnegative()
+  ratesStored: z.number().int().nonnegative(),
+  transactionsUpdated: z.number().int().nonnegative()
 });
 
 export const baseCurrencyRebuildJobResultSchema = z.object({
@@ -98,6 +100,17 @@ export const baseCurrencyRebuildJobResultSchema = z.object({
   targetBaseCurrency: z.string().regex(/^[A-Z]{3}$/),
   transactionsUpdated: z.number().int().nonnegative(),
   settingsUpdated: z.boolean()
+});
+
+export const analyticsRefreshJobResultSchema = z.object({
+  generation: z.number().int().positive(),
+  mode: z.enum(['full', 'incremental']),
+  sourceWatermark: z.string().datetime({ offset: true }).nullable(),
+  aggregateCount: z.number().int().nonnegative(),
+  recurringSeriesCount: z.number().int().nonnegative(),
+  findingCount: z.number().int().nonnegative(),
+  durationMs: z.number().int().nonnegative(),
+  affectedPeriods: z.array(isoDateSchema)
 });
 
 const jobResponseBaseSchema = z.object({
@@ -123,6 +136,10 @@ export const jobResponseSchema = z.discriminatedUnion('kind', [
   jobResponseBaseSchema.extend({
     kind: z.literal('base_currency_rebuild'),
     result: baseCurrencyRebuildJobResultSchema.nullable()
+  }),
+  jobResponseBaseSchema.extend({
+    kind: z.literal('analytics_refresh'),
+    result: analyticsRefreshJobResultSchema.nullable()
   })
 ]);
 
@@ -154,7 +171,8 @@ export const workerCategorizeJobResultSchema = z.object({
 export const workerFxRefreshJobResultSchema = z.object({
   base_currency: z.string().regex(/^[A-Z]{3}$/),
   quote_currencies: z.array(z.string().regex(/^[A-Z]{3}$/)),
-  rates_stored: z.number().int().nonnegative()
+  rates_stored: z.number().int().nonnegative(),
+  transactions_updated: z.number().int().nonnegative()
 });
 
 export const workerBaseCurrencyRebuildJobResultSchema = z.object({
@@ -162,6 +180,17 @@ export const workerBaseCurrencyRebuildJobResultSchema = z.object({
   target_base_currency: z.string().regex(/^[A-Z]{3}$/),
   transactions_updated: z.number().int().nonnegative(),
   settings_updated: z.boolean()
+});
+
+export const workerAnalyticsRefreshJobResultSchema = z.object({
+  generation: z.number().int().positive(),
+  mode: z.enum(['full', 'incremental']),
+  source_watermark: z.string().datetime({ offset: true }).nullable(),
+  aggregate_count: z.number().int().nonnegative(),
+  recurring_series_count: z.number().int().nonnegative(),
+  finding_count: z.number().int().nonnegative(),
+  duration_ms: z.number().int().nonnegative(),
+  affected_periods: z.array(isoDateSchema).default([])
 });
 
 export type IngestAccepted = z.infer<typeof ingestAcceptedSchema>;

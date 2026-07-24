@@ -70,22 +70,29 @@ export const fxFeeTransactionSchema = z.object({
   accountName: z.string().min(1),
   bookedDate: isoDateSchema,
   description: z.string(),
-  foreignAmount: decimalStringSchema,
-  foreignCurrency: currencyCodeSchema,
+  foreignAmount: decimalStringSchema.nullable(),
+  foreignCurrency: currencyCodeSchema.nullable(),
   chargedAmountNative: decimalStringSchema,
   nativeCurrency: currencyCodeSchema,
-  cardAppliedRate: decimalStringSchema,
+  bankAppliedRate: decimalStringSchema.nullable(),
   marketRate: decimalStringSchema.nullable(),
   marketRateDate: isoDateSchema.nullable(),
   marketRateSource: z.string().min(1).nullable(),
   markupPercent: decimalStringSchema.nullable(),
-  estimatedFeeNative: decimalStringSchema.nullable(),
-  estimatedFeeBase: decimalStringSchema.nullable()
+  explicitFeeNative: decimalStringSchema,
+  explicitFeeBase: decimalStringSchema.nullable(),
+  estimatedMarkupNative: decimalStringSchema.nullable(),
+  estimatedMarkupBase: decimalStringSchema.nullable(),
+  isStandaloneFee: z.boolean()
 });
 
 export const fxAnalyticsResponseSchema = z.object({
   baseCurrency: currencyCodeSchema,
-  totalEstimatedFeeBase: decimalStringSchema,
+  status: z.enum(['complete', 'partial']),
+  totalExplicitFeeBase: decimalStringSchema,
+  totalEstimatedMarkupBase: decimalStringSchema,
+  totalFxCostBase: decimalStringSchema,
+  missingRateCount: z.number().int().nonnegative(),
   transactions: z.array(fxFeeTransactionSchema)
 });
 
