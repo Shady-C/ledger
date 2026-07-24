@@ -2,7 +2,59 @@
 
 All notable changes to Ledger are documented here.
 
-## [Unreleased] — Phase 0
+## [Unreleased] — Phase 1
+
+### Added
+
+- [ADR-0003] Privacy-minimized, structured AI categorization proposals with
+  learned merchant mappings and protected user overrides.
+- [ADR-0004] Native-currency credit limits, asset/liability account semantics,
+  atomic base valuation, and deterministic net worth.
+- Phase 1 local backlog and Phase 0 retrospective.
+- Ordered migrations `006`–`011` for card-only credit limits, immutable funded
+  account identity, singleton ledger settings, category archive/protection,
+  transaction provenance, merchant/flow mappings, audited proposals,
+  discriminated retryable jobs, the conditional categorization backfill,
+  corrected fallback confidence, OFX-scoped FITID uniqueness, referenced
+  category-kind immutability, and strict suffix-only masked account references.
+- Account, institution, category, categorization proposal, transaction
+  correction, settings, job-history, net-worth, FX-analysis, and expanded
+  account-summary APIs with shared Zod contracts and exact decimal strings.
+- An unresolved-merchant API and Categories-page workload view, separate from
+  the audited low-confidence/new-category proposal queue.
+- OFX1/OFX2 bank and card parsing, validated unknown CSV/XLSX AI mapping,
+  minimized AI categorization, Frankfurter/cache/fixture FX providers, and
+  `ingest`, `categorize`, `fx_refresh`, and `base_currency_rebuild` worker jobs.
+- Focused Dashboard, Transactions, Accounts, Categories, and Imports routes
+  under a responsive shared PWA shell.
+- Component/browser/worker/contract test coverage and a synthetic Phase 1 smoke
+  harness for the golden reconciliation, repeat idempotency, USD/TZS imports,
+  categorization, utilization, net worth, FX analysis, and base switching.
+
+### Changed
+
+- Made account balances and cash flow account-kind-aware, preserved native
+  positions beside derived base values, and excluded unverifiable accounts from
+  net worth with explicit partial-state reasons. Non-null `ok`, `gap`, and
+  one-sided `pending` reported balances may anchor positions; `mismatch`
+  balances are excluded.
+- Shared one validated `0..7`-day FX-staleness policy between worker providers
+  and web reads, and returned per-row transaction running balances.
+- Limited offline private-read caching to dashboard balance and cash-flow
+  aggregates. Net worth, transactions, account lists, FX data, jobs, imports,
+  category review data, and all writes remain uncached.
+
+### Verification
+
+- Phase 1 is `in_review`: `make test`, `make check`, the production web build,
+  and a disposable fresh-stack stub-provider `make smoke` all pass. The smoke
+  preserves `2855.59`, proves zero-row repeat imports, and covers OFX1/OFX2/QFX,
+  USD/TZS valuation, categorization, utilization/net worth, FX fees, and an
+  atomic CAD-to-USD rebuild without mixed-base reads.
+- Checked-in CAD/USD/TZS fixtures are synthetic. Institution-specific sanitized
+  TZS/USD export acceptance remains pending user-supplied samples.
+
+## [Phase 0 — Ledger Core] — 2026-07-24
 
 ### Added
 

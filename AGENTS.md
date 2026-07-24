@@ -2,11 +2,12 @@
 
 ## Project Scope and Structure
 
-Ledger is a Phase 0 personal-finance application with an executable local
+Ledger is a Phase 1 personal-finance application with an executable local
 stack. Read `docs/PROJECT_CONTEXT.md` first for the active phase and scope,
-treat `docs/ARCHITECTURE.md` as the system-design reference, and use
-`docs/BUILD-PLAN.md` for the Phase 0 acceptance gates. Keep work within the
-current phase unless scope is explicitly updated.
+treat `docs/ARCHITECTURE.md` as the system-design reference, preserve
+`docs/BUILD-PLAN.md` as the Phase 0 baseline, and use
+`docs/PHASE-1-BUILD-PLAN.md` for the active acceptance gates. Keep work within
+the current phase unless scope is explicitly updated.
 
 The monorepo layout is:
 

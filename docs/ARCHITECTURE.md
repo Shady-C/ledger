@@ -1,11 +1,12 @@
 # Ledger — Architecture & System Design
 
-> Working name. A self-hostable, multi-institution, multi-currency personal
-> finance analytics app. Ingests statements from any bank in any format,
-> normalizes them into one canonical ledger, computes everything
-> deterministically, and puts a grounded natural-language layer on top.
+> Long-term target: a self-hostable, multi-institution, multi-currency personal
+> finance analytics app that normalizes supported statements into one canonical
+> ledger, computes money deterministically, and later adds a grounded
+> natural-language layer.
 
-**Status:** Phase 0 implemented and in review; later phases remain design scope.
+**Status:** Phase 1 implementation is in review with test/check/build/fresh-smoke
+acceptance recorded; Phases 2–4 remain design scope.
 **Audience:** the person building it (you).
 **Author's stance:** every tech choice below is argued, not defaulted. Where I
 picked a non-obvious tool, there's an ADR explaining what I rejected and why.
@@ -24,7 +25,9 @@ picked a non-obvious tool, there's an ADR explaining what I rejected and why.
 
 ### Non-goals (v1)
 - Not a budgeting-envelope app, not a bill-pay tool, not a bank aggregator with live API links (Plaid-style) — that's a possible v3, but statement ingestion is the trust-minimizing, bank-agnostic starting point.
-- Not multi-tenant SaaS at launch. Single-user / small-trusted-group. The data model is tenant-ready, but we don't build billing, orgs, etc. yet.
+- Not multi-tenant SaaS at launch. Phase 1 is a single-user, single-ledger local
+  application; authentication, tenant ownership, billing, and organizations are
+  later concerns.
 - No tax filing, no investment portfolio pricing (v2+).
 
 ---
@@ -50,26 +53,25 @@ These are load-bearing. Every later decision derives from them.
 
 ---
 
-## 3. System architecture (high level)
+## 3. System architecture (Phase 1)
 
 ```mermaid
 flowchart TB
     subgraph Client["Clients — PWA (phone + laptop)"]
-        UI["SvelteKit app<br/>dashboard · charts · ask-bar"]
+        UI["SvelteKit app<br/>dashboard · transactions · accounts · categories · imports"]
     end
 
     subgraph Edge["App / API tier — TypeScript"]
-        API["API + BFF<br/>auth, orchestration, query executor"]
-        AGENT["Ask service<br/>NL → query DSL → narrate"]
+        API["API + BFF<br/>validation · reads · orchestration"]
     end
 
-    subgraph Work["Ingestion & analytics — Python worker"]
-        ING["Ingestion pipeline<br/>parse · normalize · categorize · dedup"]
-        ANALYTICS["Analytics engine<br/>aggregates · trends · anomalies"]
+    subgraph Work["Ingestion & services — Python worker"]
+        ING["Ingestion pipeline<br/>parse · normalize · FX · reconcile"]
+        SVC["Service jobs<br/>categorize · FX refresh · base rebuild"]
     end
 
     subgraph AI["AI providers (bounded)"]
-        LLM["LLM: extraction, mapping,<br/>categorization tail, query planning"]
+        LLM["LLM: redacted column mapping<br/>and categorization tail"]
     end
 
     subgraph Data["State"]
@@ -79,17 +81,16 @@ flowchart TB
     end
 
     UI <--> API
-    UI --> AGENT
     API --> PG
-    AGENT --> LLM
-    AGENT --> API
     API -- enqueue job --> PG
     ING -- poll jobs --> PG
+    SVC -- poll jobs --> PG
     ING --> OBJ
     ING --> LLM
     ING --> PG
-    ANALYTICS --> PG
-    ANALYTICS --> FX
+    SVC --> LLM
+    SVC --> FX
+    SVC --> PG
     ING --> FX
 ```
 
@@ -97,13 +98,11 @@ flowchart TB
 
 | Component | Language | Responsibility |
 |---|---|---|
-| **Client (PWA)** | SvelteKit/TS | UI, charts, offline read cache, the "ask" bar. Installable on iOS/Android/desktop. |
-| **API / BFF** | Node/TS | Auth, request orchestration, the **query executor** (turns a validated query spec into parameterized SQL), serves aggregates. Shares TS types with the client. |
-| **Ask service** | Node/TS | Runs the tool-using agent: NL question → query spec (via LLM) → executor → narrated answer. Never touches the DB directly; only via the executor's tools. |
-| **Ingestion worker** | Python | The messy, data-heavy work: parse PDF/CSV/XLSX, normalize to canonical schema, categorize, dedup, FX-stamp, reconcile. Best-in-class libraries live here. |
-| **Analytics engine** | Python | Deterministic computations and materialized aggregates (trends, anomalies, recurring, forecasts). |
+| **Client (PWA)** | SvelteKit/TS | Five focused routes, charts, narrowly bounded offline dashboard reads, and responsive installability. |
+| **API / BFF** | Node/TS | Request validation, encrypted uploads, parameterized reads, deterministic analytics, account/taxonomy writes, and job orchestration. |
+| **Python worker** | Python | Parse CSV/XLSX/PDF tables/OFX, normalize, deduplicate, FX-stamp, reconcile, categorize the unknown tail, refresh rates, and rebuild base values. |
 | **Postgres** | — | Source of truth: canonical ledger, categories, learned mappings, FX rates, jobs, embeddings (pgvector). |
-| **Object store** | — | Raw uploaded statement files, encrypted at rest (S3/Cloudflare R2 or a local volume when self-hosted). |
+| **Object store** | — | Application-encrypted raw uploads through the S3 API; MinIO in the local stack. |
 
 **Why this split (polyglot on purpose):** the two hard problems are (1) turning
 arbitrary bank PDFs/CSVs into clean rows and (2) statistical analytics. Python
@@ -111,8 +110,9 @@ owns both — `pdfplumber`/`camelot` for PDF tables, `polars` for fast columnar
 analytics, `statsmodels`/`scikit-learn` for trend and anomaly work. Everything
 user-facing and orchestration-shaped is TypeScript so the client and API share
 one type system. This is a deliberate trade: one extra runtime in exchange for
-the right tool on each side. **Single-runtime fallback** (§16) exists if you'd
-rather run all-TypeScript and accept weaker PDF/analytics libraries.
+the right tool on each side. The deeper analytics engine and grounded ask
+service described in §§8–9 are Phase 2 and Phase 3 design, not current Phase 1
+components.
 
 ---
 
@@ -123,15 +123,16 @@ lands in **one** shape. Everything downstream reads canonical rows only.
 
 ```mermaid
 erDiagram
-    USER ||--o{ ACCOUNT : owns
     INSTITUTION ||--o{ ACCOUNT : issues
     ACCOUNT ||--o{ STATEMENT : has
     ACCOUNT ||--o{ TXN : has
     STATEMENT ||--o{ TXN : contains
     TXN }o--|| CATEGORY : classified_as
     TXN }o--|| MERCHANT : from
+    MERCHANT ||--o{ MERCHANT_CATEGORY_MAPPING : learned_for
+    CATEGORY ||--o{ MERCHANT_CATEGORY_MAPPING : selected_by
+    MERCHANT ||--o{ CATEGORIZATION_PROPOSAL : proposed_for
     INSTITUTION ||--o{ ADAPTER : parsed_by
-    CURRENCY ||--o{ FX_RATE : quoted
 
     ACCOUNT {
         uuid id
@@ -140,6 +141,7 @@ erDiagram
         string kind  "credit_card | chequing | savings | wallet"
         string native_currency
         string account_ref_masked
+        numeric credit_limit
     }
     STATEMENT {
         uuid id
@@ -150,7 +152,7 @@ erDiagram
         numeric closing_balance
         string currency
         string source_file_key
-        string reconcile_status "ok | gap | mismatch"
+        string reconcile_status "pending | ok | gap | mismatch"
     }
     TXN {
         uuid id
@@ -170,6 +172,8 @@ erDiagram
         string  external_ref
         string  dedup_hash
         string  direction "debit | credit | payment | fee | refund | interest"
+        string  category_source "fallback | rule | ai | user_merchant | user_transaction"
+        numeric category_confidence
         jsonb   enrichment "foreign_spend, flags, confidence"
     }
     MERCHANT {
@@ -178,11 +182,35 @@ erDiagram
         string normalized_key
         vector embedding
     }
+    MERCHANT_CATEGORY_MAPPING {
+        uuid merchant_id
+        string flow_type
+        uuid category_id
+        string source "ai | user_merchant"
+        numeric confidence
+    }
+    CATEGORIZATION_PROPOSAL {
+        uuid id
+        uuid opaque_key
+        uuid merchant_id
+        string flow_type
+        uuid proposed_category_id
+        string proposed_category_name
+        string proposed_category_kind
+        numeric confidence
+        string status "pending | accepted | rejected"
+        string provider
+        string model
+        jsonb raw_assignment
+        datetime reviewed_at
+    }
     CATEGORY {
         uuid id
         uuid parent_id
         string name
         string kind "spend | income | transfer | fee"
+        datetime archived_at
+        boolean is_protected
     }
     ADAPTER {
         uuid id
@@ -199,6 +227,19 @@ erDiagram
         numeric rate
         string source
     }
+    LEDGER_SETTINGS {
+        boolean singleton
+        string base_currency
+        datetime updated_at
+    }
+    JOB {
+        uuid id
+        string kind "ingest | categorize | fx_refresh | base_currency_rebuild"
+        string status "queued | claimed | done | failed | needs_ai"
+        string deduplication_key
+        int retry_count
+        int max_retries
+    }
 ```
 
 **Design notes**
@@ -206,9 +247,22 @@ erDiagram
 - **Sign convention is fixed at ingestion**, per account kind. Credit-card charges are `+`, payments/credits `-`; for a chequing account you may invert. The `direction` enum carries the semantic meaning so analytics never has to guess from sign alone.
 - **`amount_native` is immutable truth.** `amount_base` / `fx_rate` are derived and recomputable. Change your base currency → rebuild the base column, source rows untouched.
 - **`dedup_hash`** = hash of `(account_id, booked_date, amount_native, currency_native, normalized_description, external_ref)`. This is what makes re-uploads and overlapping statements safe.
+- **OFX FITID** is also authoritative within an account: migration `009`
+  uniquely constrains `(account_id, external_ref)` only for OFX-enriched rows.
 - **`enrichment` JSONB** holds format-specific extras (Amex "Foreign Spend Amount", flags like `possible_duplicate`, categorization `confidence`) without schema churn.
-- **`account_ref_masked`** — we store only a masked reference (`••••71001`). Full numbers never persist. (Security, §13.)
-- **pgvector on `MERCHANT.embedding`** powers "which known merchant is this new string closest to" and semantic transaction search.
+- **`account_ref_masked`** — migration `011` permits only a non-digit masked
+  label plus the final 2–6 digits (for example, `••••71001`). Full or formatted
+  account/card numbers fail both request and database validation. (Security,
+  §13.)
+- **`credit_limit`** is optional, positive, card-only, and denominated in the
+  account's native currency. It is utilization metadata, never an asset.
+- **Category provenance** makes user choices durable and prevents a later AI
+  job from overwriting a transaction-specific correction.
+- **Category kind becomes structural once used.** Migration `010` prevents
+  changing `kind` after a category is referenced by a transaction, mapping, or
+  proposal, or after it has children; unused leaf categories remain editable.
+- **pgvector on `MERCHANT.embedding`** remains available for a later semantic
+  matcher; Phase 1 uses exact learned merchant-and-flow mappings.
 
 ---
 
@@ -242,11 +296,12 @@ sequenceDiagram
     end
     W->>W: 3. normalize → canonical rows
     W->>W: 4. FX-stamp each row
-    W->>W: 5. merchant normalize + categorize (rules→vector→AI tail)
+    W->>W: 5. merchant normalize + deterministic account-aware rules
     W->>W: 6. dedup by hash
     W->>W: 7. reconcile vs statement opening/closing
     W->>DB: upsert txns + statement + flags
-    W-->>U: (push) ingest complete, N new / M skipped
+    W->>Q: enqueue novel categorization / FX work after persistence
+    W-->>U: polled result, N new / M skipped
 ```
 
 ### Format detection & adapters
@@ -254,31 +309,60 @@ sequenceDiagram
 - **Adapter** = a saved `column_map` + detection fingerprint per `(institution, format)`. Deterministic once it exists.
 - **Parsers by format:**
   - **CSV/XLSX** → Polars readers. Header row located by scanning for the first row containing date+amount-like columns (your Amex export buries it on row 7 — the detector handles that generically).
-  - **PDF** → `pdfplumber`/`camelot` for tabular statements. For irregular layouts, fall through to an **AI extraction pass** (vision/document model) that returns structured rows against a strict schema. This is the one genuinely AI-hard part of ingestion, and it's gated: try deterministic table extraction first, AI only on failure.
-  - **OFX/QFX** (many banks export it) → a plain parser; near-zero ambiguity. Support this early — it sidesteps PDF pain entirely for banks that offer it.
+  - **PDF** → deterministic `pdfplumber` table extraction. An irregular or
+    rejected table reports `needs_ai`, but Phase 1 never sends PDF content to a
+    provider. Vision/OCR fallback remains Phase 4.
+  - **OFX/QFX** → deterministic OFX1 SGML and OFX2 XML bank/card parsing.
+    Investment statements are unsupported. FITID is required and unique within
+    an account's OFX-enriched transactions; statement currency and masked
+    account identity must match the selected account.
 
 ### AI-assisted column mapping (runs once per new format)
-When an unknown CSV/XLSX arrives, send **only header names + a few sample rows**
-(not the whole file) to the LLM with a strict output schema: map each source
+When an unknown CSV/XLSX arrives, send **only header names + at most five
+structurally redacted sample rows** (not the whole file) to the LLM with a
+strict output schema: map each source
 column to a canonical field (`booked_date`, `amount`, `currency`, `description`,
 `external_ref`, …) plus detected date format, decimal/thousands separators, and
-sign convention. Validate the mapping by re-parsing the sample and checking types
-and that amounts sum sanely. On pass, persist as a new `ADAPTER`. Every future
-file from that bank is then deterministic and free.
+sign convention. Deterministic code validates column existence, amount versus
+debit/credit exclusivity, account/currency/sign compatibility, every parsed row,
+and reconciliation. Only a valid mapping is persisted as an `ADAPTER`; invalid
+output writes no financial rows and returns `needs_ai`. Every future matching
+file is then deterministic and provider-free.
 
 ### Idempotency, dedup, reconciliation
 - **Upsert on `dedup_hash`.** New hash → insert. Seen hash → skip (report as "already recorded").
+- **OFX identity:** the statement FITID is stored as `external_ref`; an OFX-only
+  partial unique index enforces `(account_id, FITID)` independently of the
+  generic content hash.
 - **Reconciliation** (a first-class discrepancy check): for each statement, assert `opening_balance + Σ amount_native == closing_balance`. Mismatch → flag `reconcile_status = mismatch` and surface it (missing rows, OCR error, or a genuine bank discrepancy). Overlapping statements with a **gap** in coverage → `gap`, so trends never silently interpolate over missing months.
+- **Position anchors:** non-null source-reported balances with status `ok`,
+  `gap`, or `pending` may establish a position. `pending` represents one-sided
+  evidence (for example, OFX with only a closing balance) that cannot satisfy a
+  two-sided arithmetic reconciliation; it is not labeled `ok`. A `mismatch`
+  balance is rejected as an anchor.
+- **Post-persistence isolation:** categorization and FX-refresh enqueueing happens
+  after financial persistence. Provider or secondary queue failures cannot roll
+  back a successfully reconciled import.
 
 ---
 
 ## 6. Multi-currency & FX
 
 - **Store three things per txn:** native amount+currency (truth), the FX rate used, and the base-currency amount (derived). Plus `fx_rate_date` and source.
-- **Rate source:** an ECB-backed free API (e.g. Frankfurter) for majors; a broader provider for thin-market currencies. **TZS is thin** — document that rates may only be available at a coarser cadence; fall back to the nearest prior available date and record which date/source was used (never silently guess).
+- **Rate source:** Frankfurter v2, whose public API can also be self-hosted and
+  covers CAD, USD, and TZS. Accept the requested date or a recorded prior date
+  no more than seven days old; otherwise fail closed.
+- **One staleness policy:** both worker provider/cache code and web account,
+  transaction, net-worth, and FX reads use the validated
+  `FX_MAX_STALENESS_DAYS` configuration. Startup rejects values outside `0..7`.
 - **Rate is stamped at `booked_date`**, cached in `FX_RATE`. Backfill job pulls missing dates.
-- **Base currency is per-user and switchable.** Changing it enqueues a rebuild of `amount_base` across all rows from the immutable native amounts — a pure recompute, no data loss.
-- **FX analytics fall out for free:** spend per currency, implied FX fees (compare card's applied rate vs market rate on that date — your Amex rows carry an `Exchange Rate` you can reconcile against), and currency-mix drift over time.
+- **Base currency is a single-ledger database setting and switchable.** Changing
+  it prefetches every required rate and atomically rebuilds `amount_base` across
+  all rows from immutable native amounts. Ingestion and the final switch use the
+  same advisory lock, so readers never observe mixed currencies.
+- **FX analytics are deterministic:** when foreign-spend evidence and a cached
+  market rate both exist, compare the card's applied rate with the market rate
+  and expose the implied fee/markup. Otherwise those fields remain absent.
 
 ---
 
@@ -292,9 +376,7 @@ flowchart LR
     A -- yes --> done["assign merchant + category"]
     A -- no --> B{rule / regex<br/>dictionary hit?}
     B -- yes --> learn
-    B -- no --> C{vector similarity<br/>to known merchant<br/>≥ threshold?}
-    C -- yes --> learn
-    C -- no --> D["LLM tail:<br/>name + category proposal"]
+    B -- no --> D["LLM tail:<br/>name + category proposal"]
     D --> validate{valid category?<br/>confidence ok?}
     validate -- yes --> learn["persist mapping<br/>(now deterministic)"]
     validate -- no --> review["queue for your review"]
@@ -302,57 +384,51 @@ flowchart LR
 ```
 
 - **Taxonomy** is hierarchical and **user-editable**; your overrides are permanent and always win.
-- **The LLM only sees the unknown tail** — a handful of never-before-seen merchant strings, sent as short text (no amounts, no account data). Its answer is validated against the real taxonomy and then *persisted as a rule*, so the same merchant never costs a second call.
-- **Confidence + review queue:** low-confidence guesses are flagged, not silently trusted. You confirm once; it learns.
+- **The LLM only sees the unknown tail** — opaque request keys, normalized
+  merchant text, a coarse flow type, and the current taxonomy. It receives no
+  amounts, dates, account/transaction IDs, balances, or statement content.
+- **Confidence + review queue:** validated existing categories at or above the
+  configured threshold apply automatically. Low-confidence guesses and all new
+  category proposals wait for review. You confirm once; it learns.
+- **Override precedence:** transaction-specific user choice → user merchant/flow
+  mapping → learned AI mapping → deterministic account-aware rule → `Other`.
+- **Review surfaces:** the API exposes distinct unresolved merchant/flow pairs
+  separately from low-confidence/new-category proposals, so the Categories page
+  can show both the remaining workload and audited decisions.
 
 ---
 
-## 8. Analytics engine — the actual analysis
+## 8. Analytics
 
-This is the answer to "why are we only looking at subs." All deterministic, all
-over the canonical ledger, most materialized as cached aggregates that refresh
-when new statements land.
+Phase 1 computes four read views directly and deterministically over the
+canonical ledger:
 
-**Cash flow & balances**
-- Inflow / outflow / net, per period and rolling.
-- Running balance per account and consolidated across accounts (multi-account net position).
-- Burn rate and projected period-end balance.
+- **Balance:** native/base position series with opening balances converted and
+  credit-card liabilities negated for consolidation. Non-null `ok`, `gap`, and
+  one-sided `pending` reported balances may anchor positions; `mismatch` cannot.
+- **Cash flow:** account-kind-aware inflow, outflow, and net with transfers and
+  card payments excluded from double counting.
+- **Net worth:** current assets, liabilities, and net worth from imported asset
+  and credit-card accounts. Missing verified balances or usable current rates
+  are excluded with reasons and make the response `partial`.
+- **FX:** foreign-spend evidence compared with the applicable cached market rate
+  when both inputs exist.
 
-**Spending structure**
-- By category / subcategory / merchant / account / currency, with drill-down.
-- Share-of-wallet and how it shifts over time.
+Account reads also compute exact per-card and aggregate utilization. Transaction
+reads return native and base values plus a running balance calculated for each
+ordered transaction row, not one shared end-of-day value.
 
-**Trends & seasonality**
-- Month-over-month and year-over-year deltas.
-- Moving averages and trend lines; detect rising/falling categories.
-- Seasonality once enough history exists (e.g. travel spikes).
-
-**Recurring & subscriptions** (a subset, not the headline)
-- Detect recurring charges by cadence + amount stability across periods.
-- **Upcoming renewals** and **price-hike detection** (same merchant, amount stepped up).
-- **Missing expected charge** (a recurring bill that didn't appear) — itself a discrepancy signal.
-
-**Anomalies & discrepancies** (the part you asked for)
-- **Statistical outliers:** a charge far outside a merchant's or category's normal range (robust z-score / MAD).
-- **Duplicate charges:** same merchant + amount within a short window.
-- **Statement reconciliation mismatches** (§5) and **coverage gaps**.
-- **New / churned merchants:** first-ever charge from someone; a regular that stopped.
-- **FX fee detection:** card rate vs market rate spread on foreign spend.
-- **Refund reconciliation:** did a refund actually land for a disputed charge?
-
-**Forecasting (v2)**
-- Simple, explainable projections (recurring + trend), not a black box. Always show the components.
-
-**Materialization:** heavy aggregates live in summary tables keyed by
-`(user, grain, dimension, period)`, rebuilt incrementally per account when
-ingestion completes. The API and the ask-layer read these, so dashboards and
-questions are fast and consistent (same numbers everywhere).
+Phase 2 is where trends, seasonality, recurring/renewal detection, statistical
+anomalies, duplicate-charge analysis, and materialized heavy aggregates belong.
+Forecasting remains Phase 4. Those future analytics must retain the same exact
+money, polarity, valuation, and reconciliation invariants.
 
 ---
 
-## 9. "Ask it things" — grounded NL layer
+## 9. "Ask it things" — Phase 3 design
 
-The trust-critical subsystem. The rule from §2 applies absolutely: **the model
+This subsystem is not implemented in Phase 1. Its trust rule remains:
+**the model
 never sees the database and never emits a number.** It translates and narrates;
 code computes.
 
@@ -383,51 +459,79 @@ things." If a row could be deterministic, it is.
 | Task | Deterministic or AI | If AI: model tier | Frequency | Cached / learned |
 |---|---|---|---|---|
 | Arithmetic, balances, aggregates, FX conversion | **Deterministic** | — | every read | n/a |
-| Recurring detection, anomalies, trends | **Deterministic** | — | on ingest | materialized |
+| Recurring detection, anomalies, trends (Phase 2) | **Deterministic** | — | on ingest | materialized |
 | CSV/XLSX parsing (known format) | **Deterministic** | — | every file | adapter cached |
 | **Column mapping (new/unknown format)** | AI | capable (Sonnet-class) | once per new format | **saved as adapter** |
-| **PDF extraction (irregular layout only)** | AI | capable, vision | only on parser fallback | raw file retained |
+| **PDF extraction (irregular layout only)** | Deferred to Phase 4 | capable, vision | parser fallback | raw file retained |
 | Merchant categorization — head (known) | **Deterministic** | — | every txn | rule map |
 | **Merchant categorization — unknown tail** | AI | cheap (Haiku-class) | once per new merchant | **persisted as rule** |
-| **NL question → query spec** | AI | capable | per question | prompt-cached |
-| **Result narration** | AI | cheap | per question | — |
-| Insight summaries ("what changed this month") | AI | cheap | on demand | — |
+| **NL question → query spec (Phase 3)** | AI | capable | per question | prompt-cached |
+| **Result narration (Phase 3)** | AI | cheap | per question | — |
+| Insight summaries (later phase) | AI | cheap | on demand | — |
 
-**Cost posture:** the only *recurring* AI costs are the categorization tail
-(tiny, cheap model, shrinks over time as it learns) and interactive questions.
-Bulk ingestion of a known bank costs **zero** AI. Prompt-cache the schema/catalog
-context for the ask-layer so repeat questions are cheap.
+**Cost posture:** Phase 1 recurring AI cost is limited to novel categorization
+work; unknown-format mapping runs once per validated fingerprint. Bulk ingestion
+of a known bank costs zero AI. Interactive-question cost begins only if the
+Phase 3 ask layer is built.
 
-**Data-to-AI boundary (privacy):** the LLM is only ever sent the *minimum* — header names + a few sample rows for mapping; short merchant strings for the tail; the schema + your question for planning; a computed result set for narration. **Account numbers, full statement dumps, and raw balances are not sent** except in the PDF-extraction fallback, which necessarily sends statement content — so that path is opt-in and, for the privacy-strict, swappable for a **local OCR + local model** (§13).
+**Data-to-AI boundary (privacy):** the Phase 1 model sees only redacted headers
+plus at most five sample rows for a new tabular format, or the minimized
+merchant proposal payload described above. Account-like identifiers are masked.
+Full statements, raw balances, and PDFs are not sent in Phase 1.
 
 ---
 
-## 11. API surface (sketch)
+## 11. Phase 1 API surface
 
-REST/JSON over HTTPS; typed end to end (shared TS types, generated Python models).
+REST/JSON with shared TypeScript/Zod contracts and explicitly mirrored Python
+Pydantic models where worker results cross the boundary. All money values are
+exact decimal strings.
 
 ```
-POST   /ingest              upload files → returns job id
-GET    /jobs/:id            ingestion status + reconciliation report
-GET    /accounts            list accounts, native currencies, balances
-GET    /transactions        filter/paginate/search (params mirror the query DSL)
-PATCH  /transactions/:id    user override (category, merchant, split, flag)
-GET    /analytics/:view     cashflow | categories | trends | recurring | anomalies | fx
-POST   /ask                 { question } → { answer, spec, result, chart }
-GET    /categories          taxonomy; PATCH to edit
-POST   /settings/base-currency   → enqueues base-amount rebuild
+GET    /api/health
+POST   /api/ingest
+GET    /api/jobs
+GET    /api/jobs/:id
+GET    /api/accounts
+POST   /api/accounts
+PATCH  /api/accounts/:id
+GET    /api/institutions
+POST   /api/institutions
+PATCH  /api/institutions/:id
+GET    /api/transactions
+PATCH  /api/transactions/:id
+GET    /api/categories
+POST   /api/categories
+PATCH  /api/categories/:id
+GET    /api/categories/unresolved
+GET    /api/categories/proposals
+PATCH  /api/categories/proposals/:id
+POST   /api/categories/categorize
+GET    /api/analytics/:view     balance | cashflow | net-worth | fx
+GET    /api/settings
+POST   /api/settings/base-currency
 ```
 
-The `/transactions` filter params and the `/ask` query spec are **the same DSL**,
-so the UI's filters and the NL layer are guaranteed consistent.
+The transaction and job query schemas validate URL-backed filter, sort, and
+pagination parameters. A future `/api/ask` surface belongs to Phase 3 and is not
+part of the Phase 1 server.
 
 ---
 
 ## 12. Clients
 
-- **SvelteKit PWA** — installable on iOS/Android/desktop from the browser; one codebase. Service worker caches the last-computed aggregates for **offline read** (you can glance at balances on a plane). Writes/ingestion require connectivity.
+- **SvelteKit PWA** — installable on iOS/Android/desktop from one codebase. The
+  shared shell provides Dashboard, Transactions, Accounts, Categories, and
+  Imports navigation.
+- **Narrow offline boundary:** shell assets and `/` use the shell cache. Only
+  `/api/analytics/balance` and `/api/analytics/cashflow` use a network-first
+  private-read cache. Net-worth responses are never service-worker cached.
+  Other page navigations, accounts, FX, transactions, categories, imports,
+  jobs, and every write are also uncached by the service worker.
 - **Charts:** **uPlot** for the running-balance and dense time-series (fast on mobile, tiny); **ECharts** for category/treemap/heatmap/comparison views. Deliberately not a single heavyweight React chart lib.
-- **The ask-bar** is a first-class UI element, not a chatbot in a corner: type a question, get prose **plus** the table/chart it's grounded in, with a "show the query" affordance.
+- **Ask bar (Phase 3):** if built, it should return prose plus its source
+  table/chart and a query-inspection affordance; it is not a Phase 1 client
+  element.
 - **Responsive-first**, keyboard-accessible, respects reduced-motion.
 
 ---
@@ -436,17 +540,29 @@ so the UI's filters and the NL layer are guaranteed consistent.
 
 Financial data — treat it like it matters, even single-user.
 
-- **Auth:** passkeys / WebAuthn primary (no password to leak), with an email fallback. Use a vetted auth library or provider; don't hand-roll crypto.
-- **Encryption:** TLS in transit; raw statement files encrypted at rest in object
-  storage; DB encrypted at rest. Phase 0 encrypts raw files in the application
+- **Authentication boundary:** Phase 1 has no authentication and must be treated
+  as a local single-user service. Passkeys/WebAuthn and multi-user authorization
+  are later deployment work, not current controls.
+- **Encryption:** raw statement files are encrypted in the application before
+  object storage. TLS and database/storage-volume encryption are deployment
+  requirements outside the local Compose implementation. The application
+  encrypts raw files
   with a versioned AES-256-GCM envelope before MinIO sees them, as recorded in
   [ADR-0001](decisions/0001-application-layer-statement-encryption.md). Host and
   storage encryption remain defense in depth.
-- **PII minimization:** store only masked account references; strip full account/card numbers at ingestion. Never put any identifier in a URL or query string.
-- **Least-privilege AI:** per the §10 boundary — the model sees the minimum. The PDF-extraction fallback is the only path that sends statement content; make it **opt-in per institution** and offer a **local-model / local-OCR** alternative (e.g. Tesseract + a locally-hosted model) for the privacy-strict, since this app is meant to be self-hostable end to end.
+- **PII minimization:** store only masked account references. Shared request
+  validation and migration `011` require a masked label plus a 2–6 digit suffix;
+  full/formatted account or card numbers are rejected. Never place references in
+  URLs or query strings. Resource UUIDs may appear in API paths.
+- **Least-privilege AI:** per §10, Phase 1 sends only minimized categorization
+  payloads or redacted tabular samples. PDF content is never sent. Any opt-in
+  PDF vision/local-OCR path is Phase 4 work.
 - **Secrets** in a manager (not env files in the repo); rotate provider keys.
-- **Tenant isolation** ready via row-level security even though v1 is single-user — cheap to add now, painful to retrofit.
-- **Auditability:** every derived number traces to source rows; every AI proposal (mapping, category, spec) is logged with its input and validation result.
+- **Tenant isolation:** Phase 1 has no user/tenant table or row-level security.
+  Those must be designed together with authentication before multi-user use.
+- **Auditability:** every derived number traces to source rows; categorization
+  proposals retain provider/model, opaque request identity, validated assignment,
+  status, and review timestamp. Column mappings are stored only after validation.
 
 ---
 
@@ -480,31 +596,35 @@ artifact and works across CSV banks.*
 
 **Phase 1 — Multi-bank + multi-currency for real.**
 OFX/QFX parser, AI column-mapper for unknown formats, base-currency switching,
-FX-fee analytics, second-currency accounts. Category taxonomy + rules engine +
-user overrides.
+FX-fee analytics, CAD/USD/TZS accounts, account/limit management, deterministic
+net worth, category taxonomy, learned mappings, and user overrides. The client
+is split into Dashboard, Transactions, Accounts, Categories, and Imports.
 
 **Phase 2 — Analytics depth.**
 Trends/seasonality, anomaly + discrepancy suite, recurring/renewal/price-hike
-detection, materialized aggregates, multi-account consolidation.
+detection and materialized aggregates.
 
 **Phase 3 — Ask it things.**
 Query DSL + validator + executor, the tool-using agent, narration, the ask-bar
 UI with grounded results.
 
 **Phase 4 — Ingestion hardening + polish.**
-PDF extraction (deterministic + AI fallback + local-model option), review queue
-for low-confidence categorization, forecasts, PWA offline, self-host compose.
+PDF extraction (deterministic + AI fallback + local-model option), forecasts,
+offline hardening, and deployment polish.
 
 ---
 
-## 16. Open decisions (need your call before build)
+## 16. Resolved Phase 1 decisions
 
-1. **Runtime split:** polyglot (TS app + Python worker) as recommended, or **all-TypeScript** to cut ops complexity (accepting weaker PDF/analytics libs)? My rec: polyglot — the ingestion/analytics upside is exactly your goal. But it's your ops burden.
-2. **Frontend:** SvelteKit (my rec) vs Next/React (bigger ecosystem, you've used React). Both are fine; this is taste + who else might touch the code.
-3. **Hosted-managed vs fully self-hosted** from day one? Affects auth provider and object-store choice.
-4. **PDF ingestion priority:** if your banks all offer CSV/OFX, we can defer PDF (the hardest AI-dependent part) to Phase 4 and keep AI cost near zero for a long time. Which of your banks are PDF-only?
-5. **Base currency:** CAD as base with TZS/USD as native? Or a different base? Drives the FX provider choice (TZS coverage).
-6. **AI provider + local-model appetite:** Anthropic API for the AI passes (your existing tooling), and do you want the local-OCR/local-LLM privacy path built in Phase 4, or is cloud extraction acceptable?
+1. Keep the Python worker plus SvelteKit web/API split.
+2. Keep the self-hosted Docker Compose path and single-user product boundary.
+3. Use CAD as the initial switchable base with USD and TZS native accounts.
+4. Use Frankfurter v2 for the cached FX feed.
+5. Use Anthropic first behind the provider interface, with minimized structured
+   inputs and reviewed taxonomy changes per ADR-0003.
+6. Keep irregular-PDF AI extraction and local OCR/model work in Phase 4.
+7. Move imported-account net worth into Phase 1 per ADR-0004; manual assets and
+   debts remain deferred.
 
 ---
 
