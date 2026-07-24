@@ -1,0 +1,80 @@
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Editors and local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Node / SvelteKit
+node_modules/
+.pnpm-store/
+.svelte-kit/
+.vite/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+vite.config.*.timestamp-*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Logs, reports, and temporary output
+*.log
+*.pid
+*.seed
+*.tmp
+*.temp
+.cache/
+.eslintcache
+test-results/
+playwright-report/
+
+# Local infrastructure state and financial data
+postgres-data/
+minio-data/
+uploads/
+statements/
+private/
+*.dump
+*.backup
+
+# Raw statement exports are private by default. Sanitized test fixtures are
+# explicitly allowed below and still require a deliberate review before commit.
+*.csv
+*.ofx
+*.qfx
+*.pdf
+*.xls
+*.xlsx
+!services/worker/tests/fixtures/**
+
+# Keep only sanitized, deliberately checked-in statement fixtures.
+services/worker/tests/fixtures/private/
+services/worker/tests/fixtures/raw/
