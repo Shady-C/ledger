@@ -1,6 +1,6 @@
 # Ledger — Project Context
 
-Current Phase: 1
+Current Phase: 2
 Phase Status: in_review
 Jira Epic: N/A
 Confluence Space: N/A
@@ -9,126 +9,173 @@ Confluence Space: N/A
 
 Ledger is a self-hostable personal-finance application that imports bank
 statements into one auditable canonical ledger. Financial values are parsed,
-stored, reconciled, converted, and aggregated with deterministic code. Phase 1
-extends the proven Phase 0 slice to multiple institutions, CAD/USD/TZS accounts,
-governed AI categorization, account management, and focused application routes.
+stored, reconciled, converted, aggregated, and analyzed with deterministic
+code. Phase 2 makes original, account-posted, and CAD-reporting money explicit
+and adds materialized trends, recurring-series detection, and explainable
+reviewable findings.
 
-The detailed system design lives in [ARCHITECTURE.md](ARCHITECTURE.md), and the
-implementation sequence and Phase 0 acceptance criteria live in
-[BUILD-PLAN.md](BUILD-PLAN.md). The active Phase 1 backlog and acceptance gates
-live in [PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md). The practical module and
-operations map for a new maintainer is
-[CODEBASE_HANDOFF.md](CODEBASE_HANDOFF.md).
+The detailed system design lives in [ARCHITECTURE.md](ARCHITECTURE.md). Preserve
+[BUILD-PLAN.md](BUILD-PLAN.md) as the Phase 0 baseline and
+[PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) as the completed Phase 1 record.
+The active backlog and acceptance gates live in
+[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). The practical module and
+operations map is [CODEBASE_HANDOFF.md](CODEBASE_HANDOFF.md).
 
-## Phase 1 Scope
+## Phase 2 Scope
 
-Phase 1 is complete when the local stack can:
+Phase 2 is complete when the local stack can:
 
-1. Preserve every Phase 0 ingestion, idempotency, reconciliation, and security
-   guarantee, including the golden closing balance of `2855.59`.
-2. Create and edit bank and credit-card accounts with optional card limits.
-3. Parse OFX/QFX and learn validated adapters for unknown CSV/XLSX layouts.
-4. Stamp and cache historical CAD, USD, and TZS FX rates and switch the global
-   reporting currency without changing native ledger truth.
-5. Categorize novel merchants through minimized, structured AI proposals while
-   preserving user overrides and requiring review for taxonomy changes.
-6. Display deterministic credit utilization, asset/liability totals, partial
-   valuation states, net worth, and FX-fee analytics.
-7. Provide focused Dashboard, Transactions, Accounts, Categories, and Imports
-   routes under one responsive PWA shell.
-8. Pass shared-contract, API, worker, browser, lint, type, and fresh-stack smoke
-   gates against sanitized CAD/USD/TZS fixtures.
+1. Preserve every Phase 0/1 ingestion, idempotency, reconciliation, privacy,
+   and security guarantee, including the `2855.59` closing balance.
+2. Represent optional original purchase money, exact account-posted money, and
+   nullable derived CAD reporting money without conflating the three layers.
+3. Import a statement only into an account of the same posted currency, reject
+   mixed posted currencies, and keep separate TZS and USD account balances.
+4. Persist and reconcile valid native transactions when CAD rates are missing,
+   report them as `pending_fx`, and backfill only derived valuation later.
+5. Accept the supplied sanitized real I&M Tanzania TZS-account statements
+   through a versioned institution adapter with exact reconciliation and
+   zero-row repeat imports. Institution-specific USD statement acceptance is
+   deferred by ADR-0006; generic USD ledger behavior remains covered.
+6. Materialize deterministic trends, comparisons, seasonality, recurring
+   activity, renewals, price changes, and explainable findings.
+7. Preserve user recurring corrections and finding review state through
+   incremental and full analytics refreshes.
+8. Provide an accessible `/insights` workflow and a compact Dashboard summary
+   while retaining exact decimal API contracts and explicit partial coverage.
+9. Meet the regression, performance, production-build, clean-migration/seed,
+   and disposable fresh-stack gates in the Phase 2 build plan.
 
-PDF parsing remains deterministic-only. Unknown/irregular PDFs may be reported
-as requiring AI, but Phase 1 never sends PDF or complete statement content to a
-model.
+Forecasting, natural-language querying, outbound notifications,
+authentication/multi-user tenancy, irregular-PDF AI extraction, investments,
+budgets, and manual assets or liabilities are outside Phase 2.
 
 ## Implementation State
 
-The current working tree contains the Phase 1 data model, worker services,
-public contracts/APIs, and five-route client. On 2026-07-24, `make test`,
-`make check`, the production web build, all 11 fresh migrations plus the seed,
-and a disposable fresh-stack stub-provider `make smoke` passed. Phase 1 is now
-ready for review.
+Phase 1 completed on 2026-07-24. Its recorded integrated test, static-check,
+production-build, clean migration/seed, and disposable fresh-stack synthetic
+smoke gates passed. The Phase 1 implementation includes the multi-account data
+model, four service-job kinds, OFX/QFX and validated tabular ingestion,
+governed categorization, historical FX caching, account/net-worth analytics,
+and five focused application routes.
 
-Migrations `006` through `011` add the Phase 1 foundations: card-only credit
-limits and funded-account identity immutability; the CAD-seeded singleton
-setting; category archive/protection, provenance, merchant/flow mappings, and
-audited proposals; four discriminated job kinds with active deduplication and
-three retries; the conditional one-time categorization backfill; corrected
-fallback confidence; account-scoped FITID uniqueness for OFX-enriched rows;
-category-kind immutability once a category is structurally referenced; and a
-database-enforced masked-label-plus-suffix account-reference format that rejects
-full or formatted account/card numbers.
+Phase 2 is now `in_review`. Migrations `012` and `013`, the three-layer
+worker/persistence paths, deterministic generic CSV/XLSX support, materialized
+analytics worker, shared contracts, Insights APIs, `/insights` route, compact
+transaction amount stack, and Dashboard integration are present in the working
+tree. Incremental refreshes recompute monthly aggregates for source months
+changed since the published watermark and copy unaffected monthly rows into the
+new generation; recurring series and findings are deliberately recomputed over
+the full ledger because their evidence can cross period boundaries. Full mode
+rebuilds all derived data, and both modes publish one generation atomically.
 
-All checked-in financial fixtures and stub-provider results are synthetic.
-Sanitized institution-specific TZS/USD exports have not yet been supplied or
-accepted. Synthetic tests cover protocol, valuation, privacy, retry, and failure
-behavior, but institution-specific CSV/XLSX compatibility remains a Phase 1
-acceptance item.
+The final automated synthetic verification checkpoint passes:
 
-## Explicitly Out of Scope
+- `make check`: Svelte reports zero errors and zero warnings; Ruff passes; and
+  strict mypy succeeds across 32 source/script files.
+- `make test`: 22 shared-contract, 48 web-server, 7 component, 15 Playwright,
+  and 185 worker tests pass, with 1 intentional worker skip.
+- `pnpm build` completes the production web build.
+- Disposable PostgreSQL acceptance applies migrations `001`–`013` from empty,
+  upgrades Phase 1 data without changing posted/CAD values, backfills valid
+  Amex original money, enforces currency constraints, accepts pending-CAD TZS
+  truth, queues FX/analytics work, and rolls back/reapplies `012`/`013`.
+- The disposable 100,000-transaction benchmark completes a production full
+  analytics rebuild in `8.298s` against the `120s` limit; its slowest warm
+  materialized read is `2.212ms` against the `1000ms` limit.
+- A uniquely named isolated Compose project rebuilt the current images, applied
+  clean migrations `001`–`013` plus the seed, and passed the Phase 2 `make
+  smoke` contract: the Phase 0 statement reconciled to `2855.59` with six rows
+  and zero on repeat; synthetic USD/TZS activity proved both three-layer flow
+  directions, fixed CAD, explicit fee/markup evidence, analytics refresh,
+  materialized Insights reads, and durable finding review. Its disposable
+  project/volumes were removed, and the default user stack was untouched.
 
-- Live bank connections
-- Authentication and multi-tenant product flows
-- Investment, loan, property, and other manual balance-sheet accounts
-- AI extraction for irregular PDFs and local OCR/model fallback
-- Advanced trends, anomaly detection, recurring detection, and forecasting
-- Natural-language querying and result narration
-- Vector-similarity categorization
+The supplied local acceptance set now covers eleven sanitized I&M Bank Tanzania
+TZS image-PDF statements through `im_bank_tz_pdf_v1`. All eleven reconcile
+exactly, representing 41 transactions and five valid zero-activity statements.
+The largest statement contributes 17 rows on first import and zero on repeat;
+the same file also passes the encrypted object-store, web, worker, PostgreSQL,
+CAD-valuation, reconciliation, and idempotency path. The adapter uses bounded
+local Tesseract OCR and validates every amount against running balances,
+printed totals, and the closing balance before persistence.
+
+ADR-0006 defers a named real-USD institution adapter until a sanitized sample is
+supplied. Generic USD CSV/XLSX/OFX behavior and both original/posted currency
+directions remain covered by deterministic synthetic tests. The supplied PDFs
+remain local ignored inputs; only sanitized OCR-text derivatives are checked in.
+With the real TZS and automated gates satisfied, Phase 2 is ready for review,
+but it is not closed until review is approved.
 
 ## Technology Stack
 
-| Area | Phase 1 choice |
+| Area | Phase 2 choice |
 |---|---|
 | Web UI and BFF | SvelteKit, TypeScript, adapter-node |
-| Shared contracts | TypeScript types and Zod schemas |
+| Shared contracts | TypeScript types and Zod schemas with exact decimal strings |
 | Worker | Python 3.12, Polars, Pydantic, psycopg |
-| Database and queue | PostgreSQL 16 with pgvector; migrations `001`–`011` and discriminated jobs |
+| Database and queue | PostgreSQL 16 with pgvector, ordered SQL migrations, and discriminated jobs |
 | Object storage | MinIO through the S3 API |
 | FX rates | Frankfurter v2 public or self-hosted API with PostgreSQL cache |
-| AI provider | Provider seam with Anthropic structured outputs first |
-| Charts | uPlot for running balance; ECharts for cash flow |
+| AI provider | Provider seam with Anthropic structured outputs for bounded mapping/categorization only |
+| Analytics | Deterministic Python/SQL materialization with durable reviewed findings |
+| Charts | uPlot for dense series; ECharts for comparisons and Insights views |
 | Local orchestration | Docker Compose and Make |
-| Quality gates | TypeScript checking, Vitest, pytest, Ruff, mypy |
+| Quality gates | TypeScript checking, Vitest, Playwright, pytest, Ruff, mypy, smoke and the disposable 100k analytics benchmark |
 
 ## Architecture
 
-The SvelteKit service owns the browser UI and HTTP API. It stores uploads in
-MinIO, writes ingest jobs to PostgreSQL, and serves parameterized ledger reads.
-The Python worker claims queued jobs with row locking, fetches raw objects,
-selects or learns a validated adapter, normalizes and FX-stamps rows, applies
-deterministic enrichment, inserts them idempotently, reconciles each statement,
-and records the job result. Separate jobs enrich unknown merchants and rebuild
-derived base values. PostgreSQL is the source of truth; MinIO retains only
-application-encrypted source files.
+The SvelteKit service owns the browser UI and HTTP API. It stores encrypted
+uploads in MinIO, writes jobs to PostgreSQL, and serves parameterized ledger and
+Insights reads. In the Phase 2 implementation, the Python worker claims queued work
+with row locking, selects or learns a validated adapter, normalizes and
+persists native rows, reconciles statements, enriches available CAD valuation,
+and materializes analytics. PostgreSQL remains the source of truth for ledger
+rows, cached rates, analytics snapshots, finding review state, settings, and
+run metadata.
 
-## Canonical Phase 1 Data
+The Phase 2 processing contract adds `analytics_refresh` after successful
+ingestion, category/proposal or transaction corrections, and FX backfills. Its
+incremental mode refreshes affected monthly periods and carries forward
+unaffected aggregate rows; recurrence and finding detectors still evaluate the
+ledger-wide evidence set. Full mode rebuilds all derived data. Jobs are
+deduplicated, report their affected periods, and publish atomically so readers
+do not observe a partial snapshot. Models may propose redacted mappings or
+categories; no model computes money, statistics, recurring series, or findings.
 
-The ordered SQL migrations define institutions, accounts, statements,
-categories, merchants, transactions, jobs, adapters, and FX rates. Monetary
-columns use fixed-precision numeric values. A transaction stores immutable
-native amount/currency values alongside derived base-currency values and the
-rate/date used. `dedup_hash` is unique and makes repeated ingestion safe.
+## Canonical Phase 2 Data
 
-Accounts carry kind, native currency, optional masked reference, and an optional
-native-currency credit limit for cards. Transactions record category provenance
-and confidence; merchant/flow mappings and audited proposals carry learned AI
-state. A single settings row stores the active reporting currency. Derived base
-amounts can be rebuilt, while native values remain immutable.
+A transaction has three separate monetary layers:
 
-Credit-card sign convention remains fixed: charges and fees are positive;
-payments, credits, and refunds are negative. Reconciliation uses:
+- `original_amount` and `original_currency` are optional immutable merchant
+  evidence and must be present together.
+- `amount_native` and `currency_native` are required immutable bank-posted
+  account truth and drive reconciliation and deduplication.
+- `amount_base`, `fx_rate`, and `fx_rate_date` are nullable derived CAD
+  reporting values; missing eligible rates produce `pending_fx`.
+
+`fx_fee_amount_native` represents an explicit inline fee already included in
+the posted amount. `is_fx_fee` marks a standalone fee transaction. Original and
+posted amounts use the same flow sign, and analytics use absolute magnitudes
+where a conversion ratio is required. A transaction's valuation or analytics
+enrichment never changes its posted identity.
+
+Every account and statement has one posted currency. Reconciliation remains:
 
 `opening_balance + sum(amount_native) = closing_balance`
+
+CAD is the fixed public reporting lens for Phase 2. An internal base rebuild is
+retained only for migration/recovery compatibility. Monthly aggregates,
+recurring series/occurrences, findings, analytics settings, and analytics-run
+metadata are durable derived state governed by ADR-0005.
 
 ## Phase Roadmap
 
 | Phase | Focus | Status |
 |---|---|---|
 | 0 | Ledger core, deterministic ingestion, basic dashboard | Completed |
-| 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | In review |
-| 2 | Deep analytics, anomalies, recurring detection | Not started |
+| 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | Completed 2026-07-24 |
+| 2 | Three-layer money, real TZS acceptance, deep analytics and Insights | In review |
 | 3 | Grounded natural-language query layer | Not started |
 | 4 | Ingestion hardening, adapter review/schema evolution, offline polish, forecasts | Not started |
 
@@ -136,38 +183,48 @@ payments, credits, and refunds are negative. Reconciliation uses:
 
 - Use a polyglot TypeScript/Python split because ingestion and analytics benefit
   from Python while UI and request orchestration benefit from shared TS types.
-- Use plain ordered SQL migrations to keep the schema explicit and portable.
-- Use PostgreSQL itself for the Phase 1 discriminated job queue; Redis is not
-  required at this scale.
-- Keep all financial arithmetic deterministic and independently testable.
-- Seed CAD as the reporting currency, cache dated provider rates for every
-  non-identity conversion, and change the active base only after an atomic
-  rebuild succeeds.
-- Store only masked account references and sanitized test data.
-- Encrypt raw statements before object storage with the versioned envelope in
+- Use ordered SQL migrations and PostgreSQL-backed jobs to keep schema, queues,
+  and materialized analytics explicit and portable.
+- Keep every financial and statistical calculation deterministic and
+  independently testable.
+- Preserve application-encrypted raw statements per
   [ADR-0001](decisions/0001-application-layer-statement-encryption.md).
-- Minimize and validate every AI categorization proposal as recorded in
+- Minimize and validate AI categorization per
   [ADR-0003](decisions/0003-ai-categorization-proposals.md).
-- Treat card balances as liabilities and value net worth deterministically as
-  recorded in [ADR-0004](decisions/0004-account-positions-and-net-worth.md).
+- Treat cards as liabilities and value imported-account net worth per
+  [ADR-0004](decisions/0004-account-positions-and-net-worth.md).
+- Preserve original, posted, and nullable CAD-reporting layers; defer missing
+  valuations; and materialize durable deterministic insights per
+  [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md).
+- Accept the supplied image-only I&M Tanzania TZS layout through bounded local
+  OCR and exact ledger checks, while deferring named USD-statement acceptance,
+  per
+  [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md).
 
-## Environment Variables
+## Environment and Data Safety
 
-The committed `.env.example` is authoritative. It documents database,
-object-storage, statement-encryption, service, FX endpoint/staleness, polling,
-and Anthropic provider configuration. CAD is the initial database setting, not
-a permanently fixed environment-only value. Real `.env` files and credentials
-must never be committed. Losing the production statement-encryption key makes
+The committed `.env.example` is authoritative for database, object-storage,
+statement encryption, services, FX endpoint/staleness, polling, and AI provider
+configuration. CAD is the fixed Phase 2 public reporting currency, not a
+user-switchable environment option. Real `.env` files and credentials must
+never be committed. Losing the production statement-encryption key makes
 stored raw files unreadable.
+
+Store only masked account references and sanitized test data. Real statement
+samples must be sanitized before they become fixtures. Minimize financial data
+sent to external AI services; no model receives complete statements, balances,
+analytics histories, or finding calculations.
 
 ## Working Agreements
 
-- Stay within the active Phase 1 scope unless the scope is explicitly changed.
-- Update this document and the affected design document before implementing a
-  scope deviation.
-- Record material deviations in `docs/decisions/` and `CHANGELOG.md`.
-- Never use an LLM for arithmetic or allow one to write directly to the ledger.
-- Let AI propose translations from novel statements into the canonical model,
-  but require an ADR, migration, deterministic rules, fixtures, and tests when
-  a genuinely new financial concept requires the canonical model itself to
-  change.
+- Stay within active Phase 2 scope unless the source-of-truth documents and
+  phase metadata are explicitly changed.
+- Record material deviations in `docs/decisions/`, update affected docs, and
+  append `CHANGELOG.md` before implementation diverges.
+- Never let an LLM perform arithmetic, statistics, or a direct ledger write.
+- Add named bank adapters only from sanitized real fixtures and version each
+  institution/export layout.
+- Do not advance Phase 2 from review to complete until review is approved and
+  every non-deferred acceptance gate remains green.
+- `docs/` is canonical. Confluence is only a future publish target; Jira and
+  Confluence are currently unconfigured.

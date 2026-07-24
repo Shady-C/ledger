@@ -1,8 +1,9 @@
 # Ledger — Phase 1 Build Plan
 
 Current Phase: 1
-Phase Status: in_review
+Phase Status: completed
 Jira Epic: N/A
+Completed: 2026-07-24
 
 ## Outcome
 
@@ -34,7 +35,9 @@ keeping all balances, conversions, reconciliation, and analytics deterministic.
 - Phase 0 closing balance remains `2855.59`; repeat ingestion adds zero rows.
 - OFX1/OFX2 bank and credit-card fixtures normalize and reconcile, while
   investment statements fail closed.
-- Sanitized USD and TZS statement samples ingest with dated, cached FX rates.
+- Synthetic sanitized USD and TZS statement samples ingest with dated, cached
+  FX rates. Institution-specific real-bank exports are a Phase 2 acceptance
+  gate under ADR-0005.
 - Known merchants make no model call; unknown merchants use minimized structured
   proposals and never overwrite transaction-specific user choices.
 - Base-currency rebuilds are all-or-nothing and preserve every native value.
@@ -53,3 +56,13 @@ keeping all balances, conversions, reconciliation, and analytics deterministic.
 - Vector-similarity categorization
 - Trends, anomalies, recurring detection, forecasting, and natural-language
   queries
+
+## Closure Record
+
+Phase 1 closed on 2026-07-24 after the recorded integrated test, static-check,
+production-build, clean migration/seed, and disposable fresh-stack synthetic
+smoke gates passed. The permanent `2855.59` reconciliation and zero-row repeat
+import assertions remain regression gates. Sanitized institution-specific TZS
+and USD statements were not supplied or accepted; that real-bank evidence is a
+Phase 1 carry-forward, not a claim of Phase 1 verification. ADR-0006 later
+accepted supplied I&M Tanzania TZS evidence and deferred a named USD adapter.

@@ -5,8 +5,10 @@
 > ledger, computes money deterministically, and later adds a grounded
 > natural-language layer.
 
-**Status:** Phase 1 implementation is in review with test/check/build/fresh-smoke
-acceptance recorded; Phases 2–4 remain design scope.
+**Status:** Phase 1 completed on 2026-07-24. Phase 2 is `in_review`; its
+foundation, automated verification, and supplied I&M Tanzania TZS real-bank
+acceptance gates are implemented and passing. A named USD institution adapter
+is deferred under ADR-0006.
 **Audience:** the person building it (you).
 **Author's stance:** every tech choice below is argued, not defaulted. Where I
 picked a non-obvious tool, there's an ADR explaining what I rejected and why.
@@ -25,7 +27,7 @@ picked a non-obvious tool, there's an ADR explaining what I rejected and why.
 
 ### Non-goals (v1)
 - Not a budgeting-envelope app, not a bill-pay tool, not a bank aggregator with live API links (Plaid-style) — that's a possible v3, but statement ingestion is the trust-minimizing, bank-agnostic starting point.
-- Not multi-tenant SaaS at launch. Phase 1 is a single-user, single-ledger local
+- Not multi-tenant SaaS at launch. Phase 2 remains a single-user, single-ledger local
   application; authentication, tenant ownership, billing, and organizations are
   later concerns.
 - No tax filing, no investment portfolio pricing (v2+).
@@ -42,7 +44,9 @@ These are load-bearing. Every later decision derives from them.
 4. **Run AI once, then cache and learn.** The expensive AI passes (format mapping, categorizing a new merchant) happen once per *novel* input, then the learned result is persisted and reused deterministically forever.
 5. **Model tiering by task.** Cheap model for high-volume small jobs; capable model for genuinely hard extraction/planning. (Table in §10.)
 6. **Every transaction is idempotent and auditable.** Re-uploading the same or overlapping statement never double-counts. Every derived value can be traced to source rows.
-7. **The base currency is a lens, not a rewrite.** Original amount + currency are immutable truth. The base-currency view is a derived layer you can recompute or change without touching source data.
+7. **Money has three layers.** Optional original purchase money and required
+   account-posted money are immutable evidence. CAD reporting is a nullable,
+   recomputable lens and never replaces either source layer.
 
 ### Notable non-default choices (called out because you asked)
 - **Polars, not pandas**, for the analytics/ingestion worker — lazy execution, faster on statement-sized data, cleaner API, and it forces explicit schemas (good for financial correctness).
@@ -53,12 +57,12 @@ These are load-bearing. Every later decision derives from them.
 
 ---
 
-## 3. System architecture (Phase 1)
+## 3. System architecture (Phase 2 implementation)
 
 ```mermaid
 flowchart TB
     subgraph Client["Clients — PWA (phone + laptop)"]
-        UI["SvelteKit app<br/>dashboard · transactions · accounts · categories · imports"]
+        UI["SvelteKit app<br/>dashboard · transactions · accounts · categories · imports · insights"]
     end
 
     subgraph Edge["App / API tier — TypeScript"]
@@ -67,7 +71,7 @@ flowchart TB
 
     subgraph Work["Ingestion & services — Python worker"]
         ING["Ingestion pipeline<br/>parse · normalize · FX · reconcile"]
-        SVC["Service jobs<br/>categorize · FX refresh · base rebuild"]
+        SVC["Service jobs<br/>categorize · FX refresh · analytics refresh"]
     end
 
     subgraph AI["AI providers (bounded)"]
@@ -75,7 +79,7 @@ flowchart TB
     end
 
     subgraph Data["State"]
-        PG[("Postgres<br/>ledger + pgvector")]
+        PG[("Postgres<br/>ledger · analytics · findings · pgvector")]
         OBJ[("Object store<br/>raw statement files, encrypted")]
         FX["FX rates cache"]
     end
@@ -98,21 +102,22 @@ flowchart TB
 
 | Component | Language | Responsibility |
 |---|---|---|
-| **Client (PWA)** | SvelteKit/TS | Five focused routes, charts, narrowly bounded offline dashboard reads, and responsive installability. |
-| **API / BFF** | Node/TS | Request validation, encrypted uploads, parameterized reads, deterministic analytics, account/taxonomy writes, and job orchestration. |
-| **Python worker** | Python | Parse CSV/XLSX/PDF tables/OFX, normalize, deduplicate, FX-stamp, reconcile, categorize the unknown tail, refresh rates, and rebuild base values. |
-| **Postgres** | — | Source of truth: canonical ledger, categories, learned mappings, FX rates, jobs, embeddings (pgvector). |
+| **Client (PWA)** | SvelteKit/TS | Focused ledger routes plus Insights, charts, bounded offline dashboard reads, and responsive installability. |
+| **API / BFF** | Node/TS | Request validation, encrypted uploads, parameterized reads, exact-decimal contracts, review writes, and job orchestration. |
+| **Python worker** | Python | Parse, normalize, deduplicate, reconcile, enrich FX, categorize the unknown tail, and atomically materialize deterministic analytics. |
+| **Postgres** | — | Source of truth for the ledger, learned mappings, FX rates, jobs, analytics snapshots, findings, and review state. |
 | **Object store** | — | Application-encrypted raw uploads through the S3 API; MinIO in the local stack. |
 
 **Why this split (polyglot on purpose):** the two hard problems are (1) turning
-arbitrary bank PDFs/CSVs into clean rows and (2) statistical analytics. Python
-owns both — `pdfplumber`/`camelot` for PDF tables, `polars` for fast columnar
-analytics, `statsmodels`/`scikit-learn` for trend and anomaly work. Everything
+supported bank PDF/CSV/XLSX/OFX exports into clean rows and (2) statistical
+analytics. Python owns both — `pdfplumber` for PDF access and tables, bounded
+local Tesseract for the named I&M Tanzania image layout, `polars` for tabular
+processing, and exact `Decimal`/standard-library statistics for the current
+trend and anomaly work. Everything
 user-facing and orchestration-shaped is TypeScript so the client and API share
 one type system. This is a deliberate trade: one extra runtime in exchange for
-the right tool on each side. The deeper analytics engine and grounded ask
-service described in §§8–9 are Phase 2 and Phase 3 design, not current Phase 1
-components.
+the right tool on each side. Phase 2 adds the deterministic analytics engine;
+the grounded ask service described in §9 remains Phase 3 design.
 
 ---
 
@@ -133,6 +138,9 @@ erDiagram
     CATEGORY ||--o{ MERCHANT_CATEGORY_MAPPING : selected_by
     MERCHANT ||--o{ CATEGORIZATION_PROPOSAL : proposed_for
     INSTITUTION ||--o{ ADAPTER : parsed_by
+    ACCOUNT ||--o{ ANALYTICS_MONTHLY_AGGREGATE : summarized_in
+    RECURRING_SERIES ||--o{ RECURRING_OCCURRENCE : contains
+    TXN ||--o{ RECURRING_OCCURRENCE : linked_as
 
     ACCOUNT {
         uuid id
@@ -165,16 +173,20 @@ erDiagram
         uuid category_id
         numeric amount_native   "signed; +charge / -credit"
         string  currency_native
-        numeric amount_base
-        string  currency_base
-        numeric fx_rate
-        date    fx_rate_date
+        numeric original_amount "nullable; signed"
+        string  original_currency "nullable"
+        numeric amount_base "nullable"
+        string  currency_base "CAD"
+        numeric fx_rate "nullable"
+        date    fx_rate_date "nullable"
+        numeric fx_fee_amount_native "nullable; already posted"
+        boolean is_fx_fee
         string  external_ref
         string  dedup_hash
         string  direction "debit | credit | payment | fee | refund | interest"
         string  category_source "fallback | rule | ai | user_merchant | user_transaction"
         numeric category_confidence
-        jsonb   enrichment "foreign_spend, flags, confidence"
+        jsonb   enrichment "format-specific flags and confidence"
     }
     MERCHANT {
         uuid id
@@ -234,22 +246,84 @@ erDiagram
     }
     JOB {
         uuid id
-        string kind "ingest | categorize | fx_refresh | base_currency_rebuild"
+        string kind "ingest | categorize | fx_refresh | base_currency_rebuild | analytics_refresh"
         string status "queued | claimed | done | failed | needs_ai"
         string deduplication_key
         int retry_count
         int max_retries
+    }
+    ANALYTICS_MONTHLY_AGGREGATE {
+        bigint generation
+        date period_start
+        string dimension_type "ledger | account | category | merchant"
+        numeric inflow_base
+        numeric outflow_base
+        numeric spending_base
+        numeric net_base
+        int pending_fx_count
+        string coverage_status "complete | partial"
+    }
+    RECURRING_SERIES {
+        uuid id
+        string detected_cadence "weekly | biweekly | monthly | quarterly | annual"
+        string status "detected | confirmed | cancelled | ignored"
+        date detected_next_date
+        string cadence_override
+        numeric expected_amount_override
+        bigint last_detected_generation
+    }
+    RECURRING_OCCURRENCE {
+        uuid series_id
+        uuid txn_id
+        numeric comparison_amount
+        string comparison_currency
+    }
+    INSIGHT_FINDING {
+        uuid id
+        string detector_type
+        string detector_fingerprint
+        string status "new | confirmed | dismissed | resolved"
+        string severity
+        jsonb evidence
+        date first_seen
+        date last_seen
+        bigint last_detected_generation
+    }
+    ANALYTICS_SETTINGS {
+        boolean singleton
+        string sensitivity "low | balanced | high"
+        bigint published_generation
+        datetime updated_at
+    }
+    ANALYTICS_RUN {
+        uuid id
+        bigint generation
+        string mode "incremental | full"
+        string status "queued | running | succeeded | failed"
+        datetime source_watermark
+        jsonb result
+        string error
     }
 ```
 
 **Design notes**
 
 - **Sign convention is fixed at ingestion**, per account kind. Credit-card charges are `+`, payments/credits `-`; for a chequing account you may invert. The `direction` enum carries the semantic meaning so analytics never has to guess from sign alone.
-- **`amount_native` is immutable truth.** `amount_base` / `fx_rate` are derived and recomputable. Change your base currency → rebuild the base column, source rows untouched.
+- **`amount_native` is bank-posted truth.** It is immutable and drives account
+  reconciliation. Optional original money is separate evidence; nullable
+  `amount_base` / `fx_rate` values are derived CAD reporting data.
+- **Original amount/currency are paired.** Both are null or both are present,
+  and their sign matches the posted transaction flow.
+- **Explicit FX fees are not duplicated.** An inline
+  `fx_fee_amount_native` is already part of the posted amount; `is_fx_fee`
+  identifies a standalone reconciling row.
 - **`dedup_hash`** = hash of `(account_id, booked_date, amount_native, currency_native, normalized_description, external_ref)`. This is what makes re-uploads and overlapping statements safe.
 - **OFX FITID** is also authoritative within an account: migration `009`
   uniquely constrains `(account_id, external_ref)` only for OFX-enriched rows.
-- **`enrichment` JSONB** holds format-specific extras (Amex "Foreign Spend Amount", flags like `possible_duplicate`, categorization `confidence`) without schema churn.
+- **`enrichment` JSONB** holds format-specific flags and confidence that do not
+  belong in first-class financial columns. Migration `012` backfills valid Amex
+  `foreign_spend` evidence into original amount/currency fields and removes the
+  duplicate JSON representation.
 - **`account_ref_masked`** — migration `011` permits only a non-digit masked
   label plus the final 2–6 digits (for example, `••••71001`). Full or formatted
   account/card numbers fail both request and database validation. (Security,
@@ -262,7 +336,10 @@ erDiagram
   changing `kind` after a category is referenced by a transaction, mapping, or
   proposal, or after it has children; unused leaf categories remain editable.
 - **pgvector on `MERCHANT.embedding`** remains available for a later semantic
-  matcher; Phase 1 uses exact learned merchant-and-flow mappings.
+  matcher; the current product uses exact learned merchant-and-flow mappings.
+- **Analytics are versioned derived state.** Monthly aggregates, recurring
+  links, and findings reference an atomically published run; durable user
+  corrections and review states are carried forward across recomputation.
 
 ---
 
@@ -295,23 +372,31 @@ sequenceDiagram
         W->>DB: save new ADAPTER (version++)
     end
     W->>W: 3. normalize → canonical rows
-    W->>W: 4. FX-stamp each row
+    W->>W: 4. enrich CAD valuation when available
     W->>W: 5. merchant normalize + deterministic account-aware rules
     W->>W: 6. dedup by hash
     W->>W: 7. reconcile vs statement opening/closing
     W->>DB: upsert txns + statement + flags
-    W->>Q: enqueue novel categorization / FX work after persistence
+    W->>Q: enqueue novel categorization / FX / analytics work
     W-->>U: polled result, N new / M skipped
 ```
 
 ### Format detection & adapters
-- **Detection**: file extension → structural fingerprint (header row signature for CSV/XLSX; text layout signature for PDF). A fingerprint maps to an `ADAPTER` row. No fingerprint match → unknown path.
+- **Detection**: file extension → structural fingerprint (header row signature for CSV/XLSX; extractable or local-OCR text layout signature for PDF). A learned fingerprint maps to an `ADAPTER` row. No deterministic match → unknown path.
 - **Adapter** = a saved `column_map` + detection fingerprint per `(institution, format)`. Deterministic once it exists.
 - **Parsers by format:**
-  - **CSV/XLSX** → Polars readers. Header row located by scanning for the first row containing date+amount-like columns (your Amex export buries it on row 7 — the detector handles that generically).
-  - **PDF** → deterministic `pdfplumber` table extraction. An irregular or
-    rejected table reports `needs_ai`, but Phase 1 never sends PDF content to a
-    provider. Vision/OCR fallback remains Phase 4.
+  - **CSV/XLSX** → conventional CSV and XLSX tables use the same
+    deterministic alias-based parser. It scans for one unambiguous header row
+    with date, description, and amount or debit/credit columns; the Amex XLSX
+    export retains its dedicated adapter.
+  - **I&M Tanzania TZS PDF v1** → local Tesseract reads the supplied stable
+    image-only layout under page, pixel, and timeout limits. Deterministic code
+    cross-checks amount magnitudes against consecutive running balances,
+    printed totals, and the closing balance before returning rows. It is a
+    named adapter, not a general OCR fallback.
+  - **Other PDF** → deterministic `pdfplumber` table extraction. An irregular
+    or rejected table reports `needs_ai`; Phase 2 never sends PDF content to a
+    provider. General vision/OCR fallback remains later work.
   - **OFX/QFX** → deterministic OFX1 SGML and OFX2 XML bank/card parsing.
     Investment statements are unsupported. FITID is required and unique within
     an account's OFX-enriched transactions; statement currency and masked
@@ -321,11 +406,13 @@ sequenceDiagram
 When an unknown CSV/XLSX arrives, send **only header names + at most five
 structurally redacted sample rows** (not the whole file) to the LLM with a
 strict output schema: map each source
-column to a canonical field (`booked_date`, `amount`, `currency`, `description`,
-`external_ref`, …) plus detected date format, decimal/thousands separators, and
-sign convention. Deterministic code validates column existence, amount versus
-debit/credit exclusivity, account/currency/sign compatibility, every parsed row,
-and reconciliation. Only a valid mapping is persisted as an `ADAPTER`; invalid
+column to a canonical field (`booked_date`, posted amount/currency,
+original amount/currency, inline FX fee, standalone FX-fee evidence,
+`description`, `external_ref`, …) plus detected date format,
+decimal/thousands separators, and sign convention. Deterministic code validates
+paired original fields, column existence, amount versus debit/credit
+exclusivity, account/currency/sign compatibility, every parsed row, and
+reconciliation. Only a valid mapping is persisted as an `ADAPTER`; invalid
 output writes no financial rows and returns `needs_ai`. Every future matching
 file is then deterministic and provider-free.
 
@@ -364,8 +451,11 @@ Adapters must remain inspectable, reversible, and auditable: record the
 fingerprint, mapping, version, validation outcome, creation source, and
 supersession relationship.
 
-Phase 1 implements the known-structure and validated new-layout paths and fails
-closed to `needs_ai`. A user-facing mapping editor/approval flow, compatibility
+The current implementation covers known structures and validated learned
+CSV/XLSX layouts and fails closed to `needs_ai`. Both deterministic and learned
+tabular mappings accept paired original-money columns, inline FX fees, and
+explicit standalone FX-fee evidence. A user-facing mapping
+editor/approval flow, compatibility
 reports for genuinely new concepts, adapter rollback/supersession controls, and
 safe replay after schema evolution belong to Phase 4 ingestion hardening.
 
@@ -375,34 +465,48 @@ safe replay after schema evolution belong to Phase 4 ingestion hardening.
   partial unique index enforces `(account_id, FITID)` independently of the
   generic content hash.
 - **Reconciliation** (a first-class discrepancy check): for each statement, assert `opening_balance + Σ amount_native == closing_balance`. Mismatch → flag `reconcile_status = mismatch` and surface it (missing rows, OCR error, or a genuine bank discrepancy). Overlapping statements with a **gap** in coverage → `gap`, so trends never silently interpolate over missing months.
+- **One posted currency:** the statement currency and every normalized posted
+  row must match the selected account. A mixed-currency statement fails
+  validation and requires separate accounts rather than implicit conversion.
 - **Position anchors:** non-null source-reported balances with status `ok`,
   `gap`, or `pending` may establish a position. `pending` represents one-sided
   evidence (for example, OFX with only a closing balance) that cannot satisfy a
   two-sided arithmetic reconciliation; it is not labeled `ok`. A `mismatch`
   balance is rejected as an anchor.
-- **Post-persistence isolation:** categorization and FX-refresh enqueueing happens
-  after financial persistence. Provider or secondary queue failures cannot roll
-  back a successfully reconciled import.
+- **Post-persistence isolation:** categorization, FX-refresh, and analytics
+  enqueueing happen after financial persistence. Missing CAD valuation or a
+  secondary queue/provider failure cannot roll back a successfully reconciled
+  native import.
 
 ---
 
 ## 6. Multi-currency & FX
 
-- **Store three things per txn:** native amount+currency (truth), the FX rate used, and the base-currency amount (derived). Plus `fx_rate_date` and source.
+- **Store three monetary layers:** optional original purchase money, required
+  account-posted/native money, and nullable derived CAD reporting money with
+  the reference rate/date used.
+- **Accounts are single-currency:** TZS and USD balances at one bank become
+  separate accounts. Statement currency and every posted row must match the
+  selected account.
 - **Rate source:** Frankfurter v2, whose public API can also be self-hosted and
-  covers CAD, USD, and TZS. Accept the requested date or a recorded prior date
-  no more than seven days old; otherwise fail closed.
+  covers CAD, USD, and TZS. Accept booked date or a recorded nearest-prior date
+  no more than seven days old. Never fall forward or silently accept an older
+  rate.
 - **One staleness policy:** both worker provider/cache code and web account,
   transaction, net-worth, and FX reads use the validated
   `FX_MAX_STALENESS_DAYS` configuration. Startup rejects values outside `0..7`.
-- **Rate is stamped at `booked_date`**, cached in `FX_RATE`. Backfill job pulls missing dates.
-- **Base currency is a single-ledger database setting and switchable.** Changing
-  it prefetches every required rate and atomically rebuilds `amount_base` across
-  all rows from immutable native amounts. Ingestion and the final switch use the
-  same advisory lock, so readers never observe mixed currencies.
-- **FX analytics are deterministic:** when foreign-spend evidence and a cached
-  market rate both exist, compare the card's applied rate with the market rate
-  and expose the implied fee/markup. Otherwise those fields remain absent.
+- **Native acceptance is independent of CAD availability:** a missing eligible
+  rate leaves reporting fields null and `valuationStatus = pending_fx`, queues
+  retryable refresh work, and makes consolidated analytics explicitly partial.
+  A later refresh changes derived reporting fields only.
+- **CAD is fixed publicly for Phase 2.** Non-CAD switch requests return
+  `409 base_currency_fixed`. The internal atomic rebuild remains for migration
+  and recovery, not user-facing reporting changes.
+- **FX analytics separate evidence:** explicit inline and standalone fees are
+  actual costs. Bank-applied and reference rates produce a signed estimated
+  markup only when evidence permits it; a known inline fee is removed from the
+  conversion portion to avoid double counting. A standalone fee is never
+  attached to another transaction without source evidence.
 
 ---
 
@@ -440,8 +544,8 @@ flowchart LR
 
 ## 8. Analytics
 
-Phase 1 computes four read views directly and deterministically over the
-canonical ledger:
+The completed Phase 1 baseline computes four read views directly and
+deterministically over the canonical ledger:
 
 - **Balance:** native/base position series with opening balances converted and
   credit-card liabilities negated for consolidation. Non-null `ok`, `gap`, and
@@ -460,16 +564,54 @@ Account reads also compute exact per-card and aggregate utilization. Transaction
 reads return native and base values plus a running balance calculated for each
 ordered transaction row, not one shared end-of-day value.
 
-Phase 2 is where trends, seasonality, recurring/renewal detection, statistical
-anomalies, duplicate-charge analysis, and materialized heavy aggregates belong.
-Forecasting remains Phase 4. Those future analytics must retain the same exact
-money, polarity, valuation, and reconciliation invariants.
+Phase 2 materializes deeper analytics in atomically published snapshots. An
+`analytics_refresh` job runs after successful ingestion, category/proposal or
+transaction corrections, and FX backfills. Incremental mode finds source months
+updated after the prior published watermark, recalculates every dimension for
+those months, and copies unaffected monthly aggregates from the previous
+generation. Recurring series and findings are recalculated ledger-wide in both
+modes because cadence, duplicate, and anomaly evidence can cross month
+boundaries. Full mode recalculates all aggregate periods plus the ledger-wide
+detectors. Jobs are deduplicated, publish one generation atomically, and record
+the source watermark, affected-period list, counts, duration, and errors.
+
+**Trends and seasonality** use a 12-month default with 3-, 6-, 24-month, and
+all-history ranges. Monthly inflow, outflow, net cash flow, and spending can be
+grouped by account, category, or merchant and compared month-over-month,
+year-over-year, or against trailing three-month average/median baselines.
+Seasonality requires at least 12 months. Unvalued rows are excluded from CAD
+totals, counted by native currency, and make coverage `partial`.
+
+**Recurring detection** excludes transfers and card payments from spending and
+uses deterministic cadence windows: weekly 5–9 days, biweekly 12–16, monthly
+25–35, quarterly 80–100, and annual 330–400. A series needs three occurrences,
+except annual candidates may use two. Comparison prefers consistent original
+currency, then account-native currency, then fully valued CAD. Expected-next
+date and overdue are recurrence metadata, not forecasting. User confirmation,
+cadence/amount corrections, cancellation, and ignore state survive refreshes.
+
+**Findings** cover unusual transaction amounts/frequency, monthly category or
+merchant spikes, near-duplicates, recurring price increases/overdue activity,
+reconciliation mismatch, coverage gaps, and pending CAD valuation. Every
+finding stores evidence, severity, first/last-seen dates, a stable detector
+fingerprint, and durable `new`, `confirmed`, `dismissed`, or `resolved` state.
+
+Balanced amount/spike sensitivity uses modified z-score `>= 3.5`, at least five
+prior comparable observations, and at least CAD 10 difference; low/high presets
+use `5.0`/CAD 25 and `2.5`/CAD 5. An interquartile-range rule handles zero MAD.
+Near-duplicates require distinct identities with the same account, merchant,
+posted currency, and absolute posted amount within three days and exclude
+refunds, reversals, transfers, and payments. Default recurring price-change
+materiality is at least 5% and CAD 1 (or comparison-basis equivalent).
+
+Forecasting remains Phase 4. No model computes analytics or sees transaction
+history for finding detection.
 
 ---
 
 ## 9. "Ask it things" — Phase 3 design
 
-This subsystem is not implemented in Phase 1. Its trust rule remains:
+This subsystem is not implemented in Phase 2. Its trust rule remains:
 **the model
 never sees the database and never emits a number.** It translates and narrates;
 code computes.
@@ -503,6 +645,7 @@ things." If a row could be deterministic, it is.
 | Arithmetic, balances, aggregates, FX conversion | **Deterministic** | — | every read | n/a |
 | Recurring detection, anomalies, trends (Phase 2) | **Deterministic** | — | on ingest | materialized |
 | CSV/XLSX parsing (known format) | **Deterministic** | — | every file | adapter cached |
+| I&M Tanzania TZS image-PDF v1 | **Deterministic local OCR + exact checks** | — | every file | versioned adapter |
 | **Column mapping (new/unknown format)** | AI | capable (Sonnet-class) | once per new format | **saved as adapter** |
 | **PDF extraction (irregular layout only)** | Deferred to Phase 4 | capable, vision | parser fallback | raw file retained |
 | Merchant categorization — head (known) | **Deterministic** | — | every txn | rule map |
@@ -511,19 +654,20 @@ things." If a row could be deterministic, it is.
 | **Result narration (Phase 3)** | AI | cheap | per question | — |
 | Insight summaries (later phase) | AI | cheap | on demand | — |
 
-**Cost posture:** Phase 1 recurring AI cost is limited to novel categorization
+**Cost posture:** current recurring AI cost is limited to novel categorization
 work; unknown-format mapping runs once per validated fingerprint. Bulk ingestion
 of a known bank costs zero AI. Interactive-question cost begins only if the
 Phase 3 ask layer is built.
 
-**Data-to-AI boundary (privacy):** the Phase 1 model sees only redacted headers
+**Data-to-AI boundary (privacy):** the model sees only redacted headers
 plus at most five sample rows for a new tabular format, or the minimized
 merchant proposal payload described above. Account-like identifiers are masked.
-Full statements, raw balances, and PDFs are not sent in Phase 1.
+Full statements, raw balances, PDFs, analytics histories, and finding evidence
+are not sent in Phase 2.
 
 ---
 
-## 11. Phase 1 API surface
+## 11. Phase 2 API surface
 
 REST/JSON with shared TypeScript/Zod contracts and explicitly mirrored Python
 Pydantic models where worker results cross the boundary. All money values are
@@ -551,20 +695,43 @@ PATCH  /api/categories/proposals/:id
 POST   /api/categories/categorize
 GET    /api/analytics/:view     balance | cashflow | net-worth | fx
 GET    /api/settings
-POST   /api/settings/base-currency
+POST   /api/settings/base-currency        CAD only; non-CAD → 409
+GET    /api/insights/summary
+GET    /api/insights/trends
+GET    /api/insights/seasonality
+GET    /api/insights/recurring
+PATCH  /api/insights/recurring/:id
+GET    /api/insights/findings
+PATCH  /api/insights/findings/:id
+GET    /api/insights/settings
+PATCH  /api/insights/settings
+POST   /api/insights/rebuild
 ```
 
-The transaction and job query schemas validate URL-backed filter, sort, and
-pagination parameters. A future `/api/ask` surface belongs to Phase 3 and is not
-part of the Phase 1 server.
+Transaction responses expose nullable `originalAmount`, `originalCurrency`,
+`amountBase`, `fxRate`, and `fxRateDate`, plus `fxFeeAmountNative`, `isFxFee`,
+and `valuationStatus`. `amountNative`/`currencyNative` retain their posted
+account meaning. All money remains exact decimal strings.
+
+Transaction, job, recurring, and finding query schemas validate URL-backed
+date, account, category, merchant, type/status, severity, sort, and pagination
+parameters as applicable. A future `/api/ask` surface belongs to Phase 3 and is
+not part of the Phase 2 server.
 
 ---
 
 ## 12. Clients
 
 - **SvelteKit PWA** — installable on iOS/Android/desktop from one codebase. The
-  shared shell provides Dashboard, Transactions, Accounts, Categories, and
-  Imports navigation.
+  shared shell provides Dashboard, Transactions, Accounts, Categories, Imports,
+  and Insights navigation.
+- **Insights workflow:** `/insights` contains Overview, Trends, Recurring, and
+  Findings tabs with filters, calculation evidence, review actions, and
+  complete/partial coverage. The Dashboard adds only a concise summary and
+  unread-finding badge.
+- **Transaction amount stack:** one Amount column labels Original, Posted, and
+  Reporting CAD values, omits duplicate layers, and reports “CAD valuation
+  pending” instead of substituting a rate.
 - **Narrow offline boundary:** shell assets and `/` use the shell cache. Only
   `/api/analytics/balance` and `/api/analytics/cashflow` use a network-first
   private-read cache. Net-worth responses are never service-worker cached.
@@ -572,7 +739,7 @@ part of the Phase 1 server.
   jobs, and every write are also uncached by the service worker.
 - **Charts:** **uPlot** for the running-balance and dense time-series (fast on mobile, tiny); **ECharts** for category/treemap/heatmap/comparison views. Deliberately not a single heavyweight React chart lib.
 - **Ask bar (Phase 3):** if built, it should return prose plus its source
-  table/chart and a query-inspection affordance; it is not a Phase 1 client
+  table/chart and a query-inspection affordance; it is not a Phase 2 client
   element.
 - **Responsive-first**, keyboard-accessible, respects reduced-motion.
 
@@ -582,7 +749,7 @@ part of the Phase 1 server.
 
 Financial data — treat it like it matters, even single-user.
 
-- **Authentication boundary:** Phase 1 has no authentication and must be treated
+- **Authentication boundary:** Phase 2 has no authentication and must be treated
   as a local single-user service. Passkeys/WebAuthn and multi-user authorization
   are later deployment work, not current controls.
 - **Encryption:** raw statement files are encrypted in the application before
@@ -596,11 +763,12 @@ Financial data — treat it like it matters, even single-user.
   validation and migration `011` require a masked label plus a 2–6 digit suffix;
   full/formatted account or card numbers are rejected. Never place references in
   URLs or query strings. Resource UUIDs may appear in API paths.
-- **Least-privilege AI:** per §10, Phase 1 sends only minimized categorization
-  payloads or redacted tabular samples. PDF content is never sent. Any opt-in
-  PDF vision/local-OCR path is Phase 4 work.
+- **Least-privilege AI:** per §10, the current product sends only minimized
+  categorization payloads or redacted tabular samples. PDF content is never
+  sent. The named I&M adapter runs Tesseract inside the worker environment;
+  general PDF vision or OCR fallback remains later work.
 - **Secrets** in a manager (not env files in the repo); rotate provider keys.
-- **Tenant isolation:** Phase 1 has no user/tenant table or row-level security.
+- **Tenant isolation:** Phase 2 has no user/tenant table or row-level security.
   Those must be designed together with authentication before multi-user use.
 - **Auditability:** every derived number traces to source rows; categorization
   proposals retain provider/model, opaque request identity, validated assignment,
@@ -636,37 +804,47 @@ Canonical schema, Amex XLSX + generic CSV adapters, dedup, FX stamping,
 running balance, reconciliation, basic dashboard. *This alone replaces the chat
 artifact and works across CSV banks.*
 
-**Phase 1 — Multi-bank + multi-currency for real.**
+**Phase 1 — Multi-bank + multi-currency baseline (completed 2026-07-24).**
 OFX/QFX parser, AI column-mapper for unknown formats, base-currency switching,
 FX-fee analytics, CAD/USD/TZS accounts, account/limit management, deterministic
 net worth, category taxonomy, learned mappings, and user overrides. The client
 is split into Dashboard, Transactions, Accounts, Categories, and Imports.
 
-**Phase 2 — Analytics depth.**
-Trends/seasonality, anomaly + discrepancy suite, recurring/renewal/price-hike
-detection and materialized aggregates.
+**Phase 2 — Three-layer money + analytics depth (in review).**
+Original/posted/CAD provenance, fixed public CAD reporting, deferred FX
+valuation, supplied I&M Tanzania TZS acceptance, materialized trends and
+seasonality, recurring/renewal/price-hike detection, anomaly/data-quality
+findings, durable review state, and the Insights workflow. A named USD
+institution adapter is deferred by ADR-0006.
 
 **Phase 3 — Ask it things.**
 Query DSL + validator + executor, the tool-using agent, narration, the ask-bar
 UI with grounded results.
 
 **Phase 4 — Ingestion hardening + polish.**
-PDF extraction (deterministic + AI fallback + local-model option), forecasts,
-offline hardening, and deployment polish.
+General PDF extraction (deterministic + governed fallback + local-model option),
+forecasts, offline hardening, and deployment polish.
 
 ---
 
-## 16. Resolved Phase 1 decisions
+## 16. Resolved Phase 2 decisions
 
 1. Keep the Python worker plus SvelteKit web/API split.
 2. Keep the self-hosted Docker Compose path and single-user product boundary.
-3. Use CAD as the initial switchable base with USD and TZS native accounts.
+3. Keep TZS, USD, and CAD accounts single-currency and preserve original,
+   posted/native, and CAD reporting money as distinct layers.
 4. Use Frankfurter v2 for the cached FX feed.
 5. Use Anthropic first behind the provider interface, with minimized structured
    inputs and reviewed taxonomy changes per ADR-0003.
 6. Keep irregular-PDF AI extraction and local OCR/model work in Phase 4.
 7. Move imported-account net worth into Phase 1 per ADR-0004; manual assets and
    debts remain deferred.
+8. Fix the public reporting lens to CAD, retain internal rebuilds for recovery,
+   and defer unavailable valuations without losing native reconciliation.
+9. Materialize analytics deterministically and preserve recurring corrections
+   and finding review states across atomic refreshes per ADR-0005.
+10. Keep forecasting in Phase 4, natural-language querying in Phase 3, and all
+    Phase 2 findings in-app only.
 
 ---
 

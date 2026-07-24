@@ -1,39 +1,45 @@
-# Ledger Phase 1 — Codebase Handoff
+# Ledger Phase 2 — Codebase Handoff
 
 **Snapshot:** 2026-07-24
 
-**Current phase:** Phase 1
+**Current phase:** Phase 2
 
 **Phase status:** `in_review`
 
-This handoff describes the Phase 1 implementation currently in the working
-tree. It is an implementation map, not an acceptance report: the final
-`make test`, `make check`, and fresh-stack `make smoke` gates still need to be
-run before the phase can move to `in_review`.
+This handoff starts from the completed Phase 1 implementation and describes the
+current Phase 2 working tree. The three-layer schema/worker paths, generic
+CSV/XLSX ingestion, analytics materialization, public contracts, Insights APIs,
+and UI are implemented. Automated synthetic verification and the supplied I&M
+Tanzania TZS real-bank acceptance set pass; the phase is awaiting review rather
+than additional implementation.
 
 ## Read These First
 
 1. [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) — active scope and phase metadata.
-2. [PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) — Phase 1 backlog and
-   acceptance gates.
-3. [BUILD-PLAN.md](BUILD-PLAN.md) — completed Phase 0 baseline and golden
+2. [PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md) — Phase 2 backlog,
+   acceptance gates, and review state.
+3. [PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) — completed Phase 1 record.
+4. [BUILD-PLAN.md](BUILD-PLAN.md) — completed Phase 0 baseline and golden
    reconciliation contract.
-4. [ARCHITECTURE.md](ARCHITECTURE.md) — current design plus explicitly labeled
+5. [ARCHITECTURE.md](ARCHITECTURE.md) — current design plus explicitly labeled
    later-phase design.
-5. [ADR-0001](decisions/0001-application-layer-statement-encryption.md),
+6. [ADR-0001](decisions/0001-application-layer-statement-encryption.md),
    [ADR-0002](decisions/0002-accept-equivalent-amex-description-columns.md),
-   [ADR-0003](decisions/0003-ai-categorization-proposals.md), and
-   [ADR-0004](decisions/0004-account-positions-and-net-worth.md).
-6. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
+   [ADR-0003](decisions/0003-ai-categorization-proposals.md),
+   [ADR-0004](decisions/0004-account-positions-and-net-worth.md),
+   [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md),
+   and
+   [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md).
+7. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
 
 `docs/` is canonical. Jira and Confluence are not configured for this project;
-the local build plan is the Phase 1 backlog.
+the local Phase 2 build plan is the active backlog.
 
 ## System at a Glance
 
 ```mermaid
 flowchart LR
-    Browser["Five-route SvelteKit PWA"] --> Web["SvelteKit API/BFF"]
+    Browser["Six-route SvelteKit PWA"] --> Web["SvelteKit API/BFF"]
     Web --> PG[("PostgreSQL 16 + pgvector")]
     Web --> MinIO[("MinIO encrypted objects")]
     Web -->|"enqueue"| Jobs["PostgreSQL job queue"]
@@ -45,11 +51,12 @@ flowchart LR
 ```
 
 The SvelteKit process owns UI rendering, validation, HTTP contracts, encrypted
-uploads, parameterized reads, and job creation. The Python worker owns parsing,
-normalization, FX stamping, deterministic categorization, reconciliation,
-provider-backed categorization and column mapping, and atomic base-currency
-rebuilds. PostgreSQL is authoritative for ledger data, settings, cached rates,
-learned mappings, review proposals, and job state.
+uploads, parameterized ledger/Insights reads, review writes, and job creation.
+The Python worker owns parsing, normalization, FX stamping, deterministic
+categorization, reconciliation, provider-backed categorization and column
+mapping, recovery base rebuilds, and atomic analytics publication. PostgreSQL
+is authoritative for ledger data, settings, cached rates, learned mappings,
+review proposals, analytics snapshots/review state, and job state.
 
 ## Repository Map
 
@@ -59,10 +66,12 @@ learned mappings, review proposals, and job state.
 | `packages/shared-types/` | Zod schemas and canonical TypeScript request/response contracts |
 | `services/worker/worker/` | Python ingestion, provider integrations, service jobs, and persistence |
 | `services/worker/tests/` | Worker regression tests and synthetic fixture policy |
-| `db/migrations/` | Ordered schema migrations `001` through `011` |
+| `db/migrations/` | Ordered schema migrations; Phase 1 ends at `011`, Phase 2 begins at `012` |
 | `db/seeds/` | Idempotent taxonomy and local development account seed |
 | `scripts/phase0_smoke.py` | Golden Phase 0 `2855.59` and repeat-import flow |
-| `scripts/phase1_smoke.py` | Extended synthetic OFX/FX/AI/account/base-switch flow |
+| `scripts/phase1_smoke.py` | Historical Phase 1 synthetic flow and shared smoke helpers |
+| `scripts/phase2_smoke.py` | Active synthetic fixed-CAD, three-layer money, FX, analytics, and Insights smoke |
+| `scripts/phase2_analytics_benchmark.py` | Disposable 100k full-refresh and warm materialized-read performance gate |
 | `docs/` | Source-of-truth scope, architecture, decisions, plans, and handoff |
 
 Generated builds, dependency stores, caches, local environments, raw financial
@@ -100,11 +109,12 @@ curl --fail --silent --show-error http://127.0.0.1:3000/api/health
 imports still work, unknown CSV/XLSX files settle as `needs_ai`, and existing
 categorization proposals remain reviewable; new categorization jobs cannot run.
 
-The active reporting currency comes from the singleton `ledger_settings` row.
-`CAD` is seeded initially. Environment values configure providers and process
-behavior; they are not a mutable replacement for the database setting.
+The Phase 1 baseline stores reporting currency in the singleton
+`ledger_settings` row and seeds `CAD`. Phase 2 fixes the public reporting lens
+to CAD: non-CAD public changes return `409 base_currency_fixed`, while the
+internal rebuild path remains available for migration and recovery.
 
-## Five-Page Application Shell
+## Current Application Routes
 
 `apps/web/src/routes/+layout.svelte` owns the persistent brand, desktop and
 mobile navigation, privacy indicator, content frame, and footer. The focused
@@ -112,11 +122,15 @@ routes are:
 
 | Route | Current responsibility |
 |---|---|
-| `/` | Net worth, assets/liabilities, completeness, utilization, balance/cash-flow charts, FX summary, and recent transactions |
-| `/transactions` | URL-backed filters, sort, paging, native/base values, running balances, provenance, and category correction |
-| `/accounts` | Asset/card sections, account and institution editing, card limits/utilization, and base-currency control |
+| `/` | Net worth, assets/liabilities, completeness, utilization, balance/cash-flow charts, actual-versus-estimated FX evidence, recent transactions, and concise Insights summary/unread badge |
+| `/transactions` | URL-backed filters, sort, paging, Original/Posted/Reporting amount stack, nullable CAD valuation, running balances, provenance, and category correction |
+| `/accounts` | Asset/card sections, account and institution editing, and card limits/utilization; the public base-currency control is removed |
 | `/categories` | Taxonomy editing/archive, unresolved work, proposal review, and categorization retry |
 | `/imports` | Account-targeted upload, job polling, history, reconciliation, failure, and `needs_ai` states |
+| `/insights` | Overview, Trends, Recurring, and Findings tabs; ranges/entity filters, evidence, review/correction actions, sensitivity, and full rebuild control |
+
+Phase 2 keeps deep exploration on `/insights`; the Dashboard contains only the
+compact summary, unread count, and navigation into that workflow.
 
 The CSS and components preserve responsive layouts, keyboard use,
 reduced-motion behavior, and installable-PWA behavior.
@@ -130,7 +144,7 @@ reduced-motion behavior, and installable-PWA behavior.
 - successful network-first reads for `/api/analytics/balance` and
   `/api/analytics/cashflow`.
 
-Direct navigation to the other four pages is network-only. Net-worth responses
+Direct navigation to the other five pages is network-only. Net-worth responses
 are never service-worker cached. The worker also does not cache transaction
 pages, account lists, FX analytics, jobs or job details, uploads or other
 writes, category/proposal data, or import history. API handlers also emit
@@ -154,7 +168,7 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `GET /api/institutions` | List institutions |
 | `POST /api/institutions` | Create an institution |
 | `PATCH /api/institutions/:id` | Rename an institution |
-| `GET /api/transactions` | URL-backed filtering, sorting, and pagination |
+| `GET /api/transactions` | URL-backed filtering, sorting, paging, three-layer money, nullable CAD valuation, and valuation status |
 | `PATCH /api/transactions/:id` | Apply a transaction correction or explicit merchant/flow mapping |
 | `GET /api/categories` | Taxonomy including archive/protection metadata |
 | `POST /api/categories` | Create a taxonomy entry |
@@ -166,24 +180,50 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `GET /api/analytics/balance` | Corrected running/consolidated position series |
 | `GET /api/analytics/cashflow` | Inflow/outflow/net plus neutral card-payment series, excluding transfer double counting |
 | `GET /api/analytics/net-worth` | Current included/excluded account valuation and completeness |
-| `GET /api/analytics/fx` | Deterministic foreign-spend market-rate and markup analysis |
-| `GET /api/settings` | Active base currency |
-| `POST /api/settings/base-currency` | Enqueue a deduplicated atomic rebuild job |
+| `GET /api/analytics/fx` | Actual explicit FX fees, bank/reference rates, signed estimated markup, and partial coverage |
+| `GET /api/settings` | Fixed CAD reporting setting |
+| `POST /api/settings/base-currency` | Accept CAD recovery rebuilds; reject non-CAD with `409 base_currency_fixed` |
+| `GET /api/insights/summary` | Range totals, MoM/YoY spending, recurring/finding counts, coverage, and latest run |
+| `GET /api/insights/trends` | Monthly series, trailing baselines, MoM/YoY comparisons, movers, and partial coverage |
+| `GET /api/insights/seasonality` | Month-of-year averages/medians or explicit insufficient history |
+| `GET /api/insights/recurring` | Filtered/paginated recurring series and linked occurrences |
+| `PATCH /api/insights/recurring/:id` | Confirm/cancel/ignore or override cadence and expected amount |
+| `GET /api/insights/findings` | Filtered/paginated durable findings with calculation evidence |
+| `PATCH /api/insights/findings/:id` | Confirm, dismiss, or resolve one finding |
+| `GET /api/insights/settings` | Analytics sensitivity and update time |
+| `PATCH /api/insights/settings` | Change sensitivity and queue a deduplicated full refresh |
+| `POST /api/insights/rebuild` | Queue an incremental or full analytics refresh |
+
+The implemented Phase 2 Insights contract exposes summary, trends, seasonality,
+recurring, findings, settings, and rebuild endpoints under `/api/insights`,
+including `PATCH` review/correction routes for recurring series and findings.
+The exact route list and filters are canonical in
+[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md#public-interfaces). Route presence
+and focused tests are not release acceptance by themselves; the integrated and
+real-bank gates remain separately recorded.
+
+Transaction payloads retain `amountNative`/`currencyNative` as posted account
+truth and add nullable `originalAmount`, `originalCurrency`, `amountBase`,
+`fxRate`, and `fxRateDate`, plus `fxFeeAmountNative`, `isFxFee`, and derived
+`valuationStatus: "valued" | "pending_fx"`. All money and rate values cross the
+API as decimal strings rather than JavaScript numbers.
 
 Important server-side files:
 
 | File | Responsibility |
 |---|---|
-| `apps/web/src/lib/server/db.ts` | Pool, parameterized queries, and canonical account/transaction/analytics read builders |
+| `apps/web/src/lib/server/db.ts` | Pool, parameterized queries, and canonical account/transaction/Phase 1 analytics read builders |
+| `apps/web/src/lib/server/insights.ts` | Materialized Insights reads, filters, review writes, settings, and rebuild enqueueing |
 | `apps/web/src/lib/server/phase1.ts` | Account mapping and deduplicated service-job enqueueing |
 | `apps/web/src/lib/server/upload.ts` | Upload validation, encrypted object writes, and ingest job creation |
 | `apps/web/src/lib/server/job-result.ts` | Worker snake_case to public camelCase result validation |
 | `apps/web/src/lib/server/api.ts` | Consistent JSON errors and privacy headers |
 
 `packages/shared-types/src/account.ts`, `analytics.ts`, `category.ts`,
-`institution.ts`, `job.ts`, `query-spec.ts`, `settings.ts`, and `transaction.ts`
-define the public TypeScript contracts. The Python Pydantic models mirror the
-worker side explicitly; they are not generated from TypeScript.
+`insights.ts`, `institution.ts`, `job.ts`, `query-spec.ts`, `settings.ts`, and
+`transaction.ts` define the public TypeScript contracts. The Python Pydantic
+models mirror the worker side explicitly; they are not generated from
+TypeScript.
 
 ## Ingestion Flow
 
@@ -192,18 +232,22 @@ worker side explicitly; they are not generated from TypeScript.
    and stores only ciphertext in MinIO.
 3. One `ingest` job references the account and content-addressed object keys.
 4. A lease-fenced worker claims the job and decrypts each object in memory.
-5. The adapter registry evaluates OFX/QFX, Amex XLSX, generic CSV, then
-   deterministic PDF tables.
+5. The adapter registry evaluates OFX/QFX, Amex XLSX, conventional generic CSV,
+   conventional generic XLSX, the named I&M Tanzania TZS image-PDF layout, and
+   deterministic extractable PDF tables.
 6. An unsupported CSV/XLSX may enter the AI column-mapping path. Unsupported
-   or irregular PDF remains deterministic `needs_ai`; Phase 1 never sends PDF
-   content to a model.
+   or irregular PDF remains deterministic `needs_ai`; Phase 2 never sends PDF
+   content to a model or external OCR service.
 7. Parsed rows are normalized with account-kind-aware signs, dated FX rates,
    deterministic categories, merchant identities, and stable dedup hashes.
 8. The worker reconciles opening balance plus native movement against closing
    balance, then persists the statement and transactions atomically.
-9. After financial persistence succeeds, novel unresolved merchant/flow pairs
-   and missing FX work can be enqueued separately. A provider failure cannot
-   roll back the reconciled import.
+9. After financial persistence succeeds, novel unresolved merchant/flow pairs,
+   missing FX work, and a deduplicated incremental analytics refresh can be
+   enqueued separately. Adapter-derived metadata enrichment of an existing
+   transaction also advances the source watermark without changing posted
+   identity. A provider or secondary-job failure cannot roll back the
+   reconciled import.
 10. The browser polls the job API and refreshes the affected views.
 
 ### Supported format behavior
@@ -211,7 +255,11 @@ worker side explicitly; they are not generated from TypeScript.
 - **Amex XLSX:** recognizes the transaction/summary export and the equivalent
   Description/Merchant aliases governed by ADR-0002.
 - **Generic CSV:** deterministic known headers, explicit date/decimal/sign
-  handling, and fail-closed ambiguity.
+  handling, paired original amount/currency, inline/standalone FX-fee evidence,
+  asset debit/credit semantics, and fail-closed ambiguity.
+- **Generic XLSX:** the versioned `generic_xlsx_v1` adapter applies the same
+  conventional-table rules to exactly one unambiguous worksheet. It is a
+  format adapter, not evidence of compatibility with any named institution.
 - **Unknown CSV/XLSX:** sends headers plus at most five structurally redacted
   sample rows to the capable-model mapping provider. It validates the column
   map, date and decimal formats, amount versus debit/credit exclusivity,
@@ -222,21 +270,31 @@ worker side explicitly; they are not generated from TypeScript.
   FITID, validates statement currency and masked account identity, and rejects
   investment statements. Migration `009` makes `(account_id, FITID)` unique for
   rows marked with `ofx_transaction_type` enrichment.
-- **PDF:** deterministic table extraction only. Missing or rejected tables
-  return `needs_ai`; irregular-PDF AI/OCR remains Phase 4.
+- **I&M Tanzania TZS PDF:** `im_bank_tz_pdf_v1` recognizes the supplied stable
+  image-only layout and runs bounded local Tesseract OCR. Every amount must
+  equal its running-balance delta, printed totals must agree, and the statement
+  must reconcile to its printed closing balance. Zero-activity statements are
+  accepted only when opening and closing balances agree. A changed layout
+  needs a new adapter version.
+- **Other PDF:** deterministic extractable-table parsing remains available.
+  Missing or rejected tables return `needs_ai`; general or irregular-PDF
+  AI/OCR remains outside Phase 2.
 
 ## Worker Modules and Providers
 
 | Module | Responsibility |
 |---|---|
 | `worker/main.py` | Environment validation, live/stub provider wiring, and worker loop |
-| `worker/pipeline.py` | Per-file ingestion and the four-kind job runner |
+| `worker/pipeline.py` | Per-file ingestion, post-persistence refresh triggers, and discriminated job runner |
 | `worker/repository.py` | PostgreSQL leases, persistence, mappings, proposals, rates, and rebuild operations |
 | `worker/storage.py` | S3/MinIO access and `LEDGER01` envelope decryption |
 | `worker/models.py` | Canonical Pydantic input/output models |
 | `worker/money.py` | Exact decimal normalization and quantization |
 | `worker/dedup.py` | Stable transaction hashes |
 | `worker/reconcile.py` | Exact native-currency reconciliation and coverage gaps |
+| `worker/analytics.py` | Exact-decimal aggregate/detector primitives plus PostgreSQL incremental/full refresh and atomic publication |
+| `worker/adapters/generic_xlsx.py` | Deterministic conventional XLSX v1 parser backed by generic tabular rules |
+| `worker/adapters/im_bank_tz_pdf.py` | Versioned I&M Tanzania TZS image-PDF adapter with bounded local OCR and exact cross-checks |
 | `worker/categorize.py` | Account-kind-aware deterministic rules and flow classification |
 | `worker/ai_categorization.py` | Minimized batching, structured validation, thresholding, mapping, and proposals |
 | `worker/column_mapping.py` | Redacted unknown-tabular mapping, validation, and learned adapter persistence |
@@ -260,7 +318,7 @@ interface; CI and smoke use fixture providers.
 
 ## Discriminated Jobs
 
-The `job.kind` discriminator is one of:
+The Phase 2 `job.kind` discriminator is one of:
 
 | Kind | Purpose | Result shape |
 |---|---|---|
@@ -268,6 +326,7 @@ The `job.kind` discriminator is one of:
 | `categorize` | Resolve distinct unknown merchant/flow pairs | Scanned, auto-applied, proposed, unchanged |
 | `fx_refresh` | Fetch and persist required dated rates | Base, quotes, and rates stored |
 | `base_currency_rebuild` | Prefetch, lock, rebuild, and switch base | Previous/target base, row count, setting result |
+| `analytics_refresh` | Incrementally or fully materialize and atomically publish Insights | Generation, mode, watermark, affected periods, aggregate/series/finding counts, duration |
 
 Active `(kind, deduplication_key)` values are unique. The worker uses claim
 tokens, heartbeats, stale-claim recovery, and fencing so an expired worker
@@ -282,7 +341,7 @@ reuse the active deduplication key.
 
 ## Database Schema and Migrations
 
-The Phase 1 schema has 12 application tables:
+The completed Phase 1 schema has 12 application tables:
 
 `institution`, `account`, `category`, `merchant`, `statement`, `txn`, `job`,
 `adapter`, `fx_rate`, `ledger_settings`, `merchant_category_mapping`, and
@@ -301,17 +360,31 @@ The Phase 1 schema has 12 application tables:
 | `009_enforce_ofx_fitid_identity` | OFX-only `(account_id, external_ref/FITID)` uniqueness |
 | `010_guard_referenced_category_kind` | Prevent kind changes once a category is referenced by transactions, mappings, proposals, or child categories |
 | `011_tighten_masked_account_references` | Reject full/formatted identifiers and allow only a non-digit masked label plus a 2–6 digit suffix |
+| `012_add_phase2_multicurrency` | Original-money and explicit-fee fields, nullable CAD valuation, Amex backfill, fixed-CAD constraints, and pending-FX index |
+| `013_add_phase2_analytics` | Versioned analytics runs/settings, monthly aggregates/current view, recurring series/occurrences, findings, and atomic generation publication |
 
 Migrations are ordered, forward-applied SQL. Never edit an already-applied
 migration to change production behavior; add the next migration.
+
+The current Phase 2 schema adds six derived-state tables, for 18 application
+tables in total. They are `analytics_run`, `analytics_settings`,
+`analytics_monthly_aggregate`, `recurring_series`, `recurring_occurrence`, and
+`insight_finding`; `analytics_monthly_current` exposes only the generation
+selected by `analytics_settings.published_generation`. The
+`publish_analytics_generation(uuid, jsonb)` database function completes a run
+and moves the published-generation pointer atomically.
 
 ## Financial Invariants
 
 - Monetary values and rates are fixed-precision database/Python decimals and
   exact decimal strings at HTTP boundaries. JavaScript and LLM arithmetic is
   never authoritative.
-- Native amount and currency are immutable truth. Base amounts, rates, and rate
-  dates are derived and rebuildable.
+- Optional original money is immutable merchant evidence. Native amount and
+  currency are immutable bank-posted truth. Base amounts, rates, and rate dates
+  are nullable derived CAD reporting values.
+- Original amount/currency are present together and use the posted flow sign.
+  An inline FX-fee component is already included in the posted amount; a
+  standalone fee remains an independent reconciling transaction.
 - Credit-card charges/fees are positive; payments, credits, and refunds are
   negative. Asset-account flows are categorized with asset semantics.
 - Statement reconciliation remains
@@ -334,14 +407,18 @@ migration to change production behavior; add the next migration.
 - Net-worth contribution is an asset-account balance or the negated card
   balance at a current cached rate. Missing verified balances or usable rates
   are excluded and make the response `partial` with per-account reasons.
-- Cash flow excludes transfer/payment double counting. FX fee/markup appears
-  only where both foreign-spend evidence and a usable market rate exist.
+- Cash flow excludes transfer/payment double counting. FX analytics report
+  explicit inline or standalone fees as actual costs; estimated markup and
+  bank/reference-rate comparisons appear only when original-money and usable
+  rate evidence permit them.
 - Transaction list running balances are calculated for every stable ordered row
   in native and, where possible, base currency; rows on the same date do not
   share an end-of-day balance.
-- A base-currency change prefetches all required history, acquires the ledger
-  valuation lock, rebuilds derived values in one transaction, and changes the
-  singleton setting last. A missing rate leaves the old base untouched.
+- CAD is the Phase 2 public reporting currency. A missing eligible rate leaves
+  reporting fields null without blocking native persistence or reconciliation;
+  later FX work updates derived fields only. Internal rebuilds remain for
+  migration/recovery, while non-CAD public switch requests fail with
+  `base_currency_fixed`.
 
 ## Categorization Precedence and Privacy
 
@@ -369,13 +446,15 @@ replace `user_transaction` or `user_merchant` provenance.
 Raw uploads are encrypted before MinIO with a versioned AES-256-GCM envelope.
 Only masked account references persist. MinIO uses a non-root bucket-scoped app
 credential. Authentication, multi-tenancy, and row-level tenant isolation are
-not Phase 1 features, so the local stack must not be exposed as if it were an
+not Phase 2 features, so the local stack must not be exposed as if it were an
 authenticated production service.
 
 ## Tests and Acceptance Commands
 
 Local quality work needs Node.js 22+, pnpm 11.4, uv, Python 3.12, Docker
-Compose, and a Chromium runtime for Playwright. Install the browser once with:
+Compose, and a Chromium runtime for Playwright. The worker container includes
+Tesseract; direct host execution of the I&M adapter also needs a `tesseract`
+executable. Install the browser once with:
 
 ```sh
 pnpm --filter @ledger/web exec playwright install chromium
@@ -386,12 +465,27 @@ Run the required local gates from the repository root:
 ```sh
 make test
 make check
+make benchmark-analytics
+make im-bank-tz-acceptance
 ```
 
 `make test` runs shared/web TypeScript tests, Svelte component tests, browser
 tests, and Python pytest through the workspace scripts. `make check` runs
-TypeScript/Svelte checks plus Ruff and strict mypy, including both smoke scripts
-in Ruff's target set.
+TypeScript/Svelte checks plus Ruff and strict mypy, including all smoke scripts
+and the benchmark script in its static-analysis target set.
+
+`make benchmark-analytics` creates a uniquely prefixed disposable PostgreSQL
+database, applies the checked-in migrations, inserts exactly 100,000 synthetic
+transactions, runs the production full analytics refresh, times five warmed
+materialized reads, enforces the two-minute/one-second limits, and drops the
+database even on failure. It requires a compatible local PostgreSQL server and
+must never target a database whose contents need to be retained.
+
+`make im-bank-tz-acceptance` reads the local sanitized PDFs from `output/pdf`
+(or `LEDGER_IM_BANK_TZ_FIXTURE_DIRECTORY`), parses them with local Tesseract,
+requires exact reconciliation for every statement, and proves zero-row repeat
+ingestion without printing transaction descriptions or account details. The
+raw PDFs remain ignored local inputs and are not required in CI.
 
 Run the extended smoke flow only against a disposable, healthy fresh stack:
 
@@ -412,30 +506,52 @@ docker compose down --volumes --remove-orphans
 `--volumes` deletes that Compose project's database and object-store volumes;
 do not use it against an environment whose data must be retained.
 
-The intended Phase 1 smoke contract includes the Phase 0 `2855.59` result,
-zero-row repeat import, synthetic OFX1/OFX2 bank/card USD/TZS statements,
-stubbed categorization, account/card utilization, partial/complete net worth,
-FX-fee analysis, and an atomic base-currency switch without mixed-base reads.
-This document does not claim those final gates have passed.
+The active Phase 2 smoke contract carries forward the Phase 0 `2855.59` result
+and zero-row repeat import. It adds synthetic separate USD/TZS accounts,
+USD-original/TZS-posted and TZS-original/USD-posted evidence, inline and
+standalone FX fees, fixed-CAD rejection, three-layer transaction and FX
+contracts, analytics refresh, materialized Insights reads, and one durable
+finding review. Those synthetic statements complement rather than replace the
+separate I&M Tanzania TZS acceptance. `scripts/phase1_smoke.py` retains the
+historical Phase 1 base-switch flow and supplies reusable helpers, but it is no
+longer the active `make smoke` entry point.
 
 CI is configured to run TypeScript/check/browser tests, Python pytest/Ruff/mypy,
-idempotent migrations and seeds with Phase 1 schema assertions, then the
-stub-provider container smoke job. Treat CI configuration as a gate definition,
-not evidence of the current working tree's result.
+all ordered migrations and idempotent seeds with retained Phase 1 baseline
+schema assertions, then the Phase 2 stub-provider container smoke job. The new
+Phase 2 focused suites live in the shared, web, component, browser, and worker
+test trees; CI configuration remains a gate definition, not evidence of the
+current working tree's integrated result.
+
+A 2026-07-24 disposable PostgreSQL checkpoint applied migrations `001`–`013`
+from empty and upgraded Phase 1 data through `012`/`013`. It preserved legacy
+posted/CAD values, backfilled valid Amex original money, proved mixed currency
+constraints fail closed, persisted a pending-CAD TZS transaction with queued FX
+and analytics work, and passed rollback/reapplication of both Phase 2
+migrations. Treat this as migration evidence only, not the complete Phase 2
+release gate.
+
+The same date's `make benchmark-analytics` checkpoint loaded exactly 100,000
+synthetic transactions into its disposable database. Full production refresh
+took `8.298s` versus the `120s` limit; the slowest warm materialized read took
+`2.212ms` versus the `1000ms` limit, and the temporary database was removed.
 
 ## Fixture Status
 
-All checked-in worker fixtures are synthetic and nonprivate. XLSX test files are
-generated in memory, the smoke scripts generate sanitized statement payloads,
-and `WORKER_PROVIDER_MODE=stub` supplies deterministic AI and FX results.
+Most checked-in worker fixtures are synthetic and nonprivate. XLSX test files
+are generated in memory, the smoke scripts generate sanitized statement
+payloads, and `WORKER_PROVIDER_MODE=stub` supplies deterministic AI and FX
+results. The two checked-in I&M Tanzania OCR-text fixtures are sanitized
+derivatives of the supplied stable layout; they cover transaction and
+zero-activity parsing without committing complete PDFs.
 
 The original private Amex exports used during Phase 0 acceptance are not
-checked in. Sanitized institution-specific TZS/USD exports have not yet been
-supplied or accepted. Synthetic fixtures cover OFX protocol behavior,
-multi-currency math, retries, privacy validation, and failure paths, but they do
-not prove compatibility with a particular institution's CSV/XLSX export.
-Institution-specific acceptance remains a Phase 1 handoff item when those
-sanitized files become available.
+checked in. The 11 sanitized I&M Tanzania TZS PDFs stay under ignored
+`output/pdf` and are validated locally: all 11 reconcile, covering 41 rows and
+five zero-activity statements, while the largest 17-row file adds zero rows on
+repeat. Synthetic fixtures still cover USD protocol behavior, both three-layer
+currency directions, retries, privacy validation, and failure paths. A named
+USD institution adapter is deferred by ADR-0006.
 
 ## Common Extension and Debug Paths
 
@@ -455,7 +571,7 @@ sanitized files become available.
   currencies, the active `base_currency_rebuild` job, and the valuation-lock
   path before attempting any repair.
 
-## Phase 1 Review Evidence
+## Phase 1 Closure Evidence
 
 - `make test` passes the shared-contract, web unit/component, Playwright, and
   worker suites.
@@ -464,8 +580,42 @@ sanitized files become available.
 - A disposable fresh stack passes the stub-provider Phase 1 smoke, including
   the permanent `2855.59` and repeat-import gates.
 - All five direct routes and mobile navigation pass browser coverage.
-- Sanitized user-supplied TZS/USD institution exports remain a review input when
-  available; synthetic protocol and failure fixtures are already green.
+- Sanitized user-supplied TZS/USD institution exports were not accepted in
+  Phase 1. Phase 2 later accepted the supplied I&M Tanzania TZS PDFs and
+  deferred institution-specific USD support under ADR-0006.
+
+## Phase 2 Implementation Checkpoint
+
+- ADR-0005 and ADR-0006 are accepted and the Phase 2 build plan is published.
+- Phase 1 is closed and its permanent reconciliation/idempotency gates carry
+  forward.
+- Migrations `012`/`013`, three-layer ingestion and persistence, fixed CAD,
+  deferred valuation, generic CSV/XLSX evidence mapping, materialized analytics,
+  durable recurring/finding review state, Insights APIs, `/insights`, and the
+  transaction/Dashboard presentation are implemented in the working tree.
+- Incremental refresh recalculates affected monthly aggregate periods and copies
+  unaffected rows; recurrence and findings deliberately remain ledger-wide.
+  Full refresh rebuilds every derived component, and publication is atomic.
+- The active synthetic smoke harness carries forward the golden reconciliation
+  and idempotency gates and exercises fixed CAD, three-layer USD/TZS evidence,
+  explicit FX fees, analytics refresh, Insights reads, and finding review.
+- A uniquely named isolated Compose project rebuilt the current images, applied
+  clean migrations `001`–`013` plus seed, and passed that Phase 2 smoke
+  contract. The Phase 0 fixture reconciled to `2855.59` with six inserted rows
+  and zero on repeat. The disposable project and volumes were removed; the
+  default user stack was untouched.
+- `make check` passes with zero Svelte errors/warnings, Ruff success, and strict
+  mypy success across 32 source/script files. `make test` passes 22 shared, 48
+  web-server, 7 component, 15 Playwright, and 185 worker tests, with 1 intentional
+  worker skip. `pnpm build` passes.
+- `im_bank_tz_pdf_v1` and its local acceptance command reconcile all 11
+  supplied TZS PDFs exactly (41 transactions, five zero-activity statements),
+  and the largest 17-row statement adds zero rows on repeat. Its end-to-end
+  encrypted upload also passes through web, object storage, worker, PostgreSQL,
+  CAD valuation, and Insights coverage.
+- The database, benchmark, fresh-stack, and TZS real-bank results complete the
+  non-deferred acceptance checkpoint. Phase 2 is `in_review`; it must not be
+  marked completed until review is approved.
 
 After significant documentation changes, sync `docs/` to Confluence when a
 space is configured. It is currently unconfigured, so no publication step can
