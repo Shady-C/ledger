@@ -169,7 +169,7 @@ async function mockLedger(page: Page, state: MockState = {}) {
       const currency = state.mismatchOnce && state.balanceReads === 1 ? 'USD' : 'CAD';
       return json({ currency, basis: 'balance', points: [{ date: '2026-07-19', balance: '3000.00' }, { date: '2026-07-20', balance: '3000.00' }] });
     }
-    if (url.pathname === '/api/analytics/cashflow') return json({ currency: 'CAD', points: [{ period: '2026-07-01', inflow: '5500.00', outflow: '2500.00', net: '3000.00' }] });
+    if (url.pathname === '/api/analytics/cashflow') return json({ currency: 'CAD', points: [{ period: '2026-07-01', inflow: '5500.00', outflow: '2500.00', cardPayments: '3000.00', net: '3000.00' }] });
     if (url.pathname === '/api/analytics/net-worth') return json({
       baseCurrency: 'CAD', valuationDate: '2026-07-20', status: state.partial ? 'partial' : 'complete',
       assets: '4200.00', liabilities: '1200.00', netWorth: '3000.00', accounts: [],

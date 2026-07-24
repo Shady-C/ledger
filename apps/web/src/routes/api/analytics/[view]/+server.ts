@@ -16,7 +16,13 @@ import {
 } from '$lib/server/db.js';
 
 type BalanceRow = { date: string; balance: string; basis: 'balance' | 'net_activity' };
-type CashflowRow = { period: string; inflow: string; outflow: string; net: string };
+type CashflowRow = {
+  period: string;
+  inflow: string;
+  outflow: string;
+  card_payments: string;
+  net: string;
+};
 type NetWorthRow = {
   account_id: string;
   display_name: string;
@@ -179,7 +185,13 @@ export async function GET({ params, url }) {
     await client.query('COMMIT');
     committed = true;
     return json(
-      { currency, points: result.rows },
+      {
+        currency,
+        points: result.rows.map(({ card_payments, ...row }) => ({
+          ...row,
+          cardPayments: card_payments
+        }))
+      },
       { headers: privateReadHeaders }
     );
   } catch (error) {

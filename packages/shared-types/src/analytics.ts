@@ -24,6 +24,7 @@ export const cashflowPointSchema = z.object({
   period: isoDateSchema,
   inflow: decimalStringSchema,
   outflow: decimalStringSchema,
+  cardPayments: decimalStringSchema,
   net: decimalStringSchema
 });
 

@@ -164,7 +164,7 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `PATCH /api/categories/proposals/:id` | Accept or reject one pending proposal atomically |
 | `POST /api/categories/categorize` | Enqueue a deduplicated manual retry/backfill |
 | `GET /api/analytics/balance` | Corrected running/consolidated position series |
-| `GET /api/analytics/cashflow` | Inflow/outflow/net series excluding transfer double counting |
+| `GET /api/analytics/cashflow` | Inflow/outflow/net plus neutral card-payment series, excluding transfer double counting |
 | `GET /api/analytics/net-worth` | Current included/excluded account valuation and completeness |
 | `GET /api/analytics/fx` | Deterministic foreign-spend market-rate and markup analysis |
 | `GET /api/settings` | Active base currency |

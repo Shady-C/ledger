@@ -407,7 +407,9 @@ canonical ledger:
   credit-card liabilities negated for consolidation. Non-null `ok`, `gap`, and
   one-sided `pending` reported balances may anchor positions; `mismatch` cannot.
 - **Cash flow:** account-kind-aware inflow, outflow, and net with transfers and
-  card payments excluded from double counting.
+  card payments excluded from double counting. Card payments remain visible as
+  a separate neutral series so imported payment activity is auditable without
+  being mislabeled as income or expense.
 - **Net worth:** current assets, liabilities, and net worth from imported asset
   and credit-card accounts. Missing verified balances or usable current rates
   are excluded with reasons and make the response `partial`.

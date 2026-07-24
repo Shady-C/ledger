@@ -638,7 +638,12 @@ export function buildCashflowQuery(spec: AnalyticsQuery): BuiltQuery {
               AND t.amount_base < 0
               THEN ABS(t.amount_base)
             ELSE 0
-          END AS outflow
+          END AS outflow,
+          CASE
+            WHEN a.kind = 'credit_card' AND t.direction = 'payment'
+              THEN ABS(t.amount_base)
+            ELSE 0
+          END AS card_payments
         FROM txn t
         JOIN account a ON a.id = t.account_id
         ${where}
@@ -647,6 +652,7 @@ export function buildCashflowQuery(spec: AnalyticsQuery): BuiltQuery {
         period::text,
         COALESCE(SUM(inflow), 0)::text AS inflow,
         COALESCE(SUM(outflow), 0)::text AS outflow,
+        COALESCE(SUM(card_payments), 0)::text AS card_payments,
         (COALESCE(SUM(inflow), 0) - COALESCE(SUM(outflow), 0))::text AS net
       FROM classified
       GROUP BY period

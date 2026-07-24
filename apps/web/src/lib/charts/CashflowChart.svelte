@@ -20,7 +20,7 @@
       {
         animation: !reduced,
         aria: { enabled: true, decal: { show: true } },
-        color: ['#75ad9f', '#e36f54'],
+        color: ['#75ad9f', '#e36f54', '#c9a449'],
         grid: { left: 12, right: 12, top: 18, bottom: 24, containLabel: true },
         tooltip: { trigger: 'axis', valueFormatter: (value: unknown) => `${currency} ${Number(value).toFixed(2)}` },
         legend: { bottom: 0, textStyle: { color: '#64706d', fontFamily: 'Manrope Variable' } },
@@ -57,6 +57,13 @@
             barMaxWidth: 24,
             itemStyle: { borderRadius: [5, 5, 0, 0] },
             data: points.map((point) => Number(point.outflow))
+          },
+          {
+            name: 'Card payments',
+            type: 'bar',
+            barMaxWidth: 24,
+            itemStyle: { borderRadius: [5, 5, 0, 0] },
+            data: points.map((point) => Number(point.cardPayments ?? 0))
           }
         ]
       },

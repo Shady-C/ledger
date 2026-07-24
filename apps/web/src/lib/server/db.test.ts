@@ -161,6 +161,10 @@ describe('analytics query builders', () => {
     expect(sql).toContain(
       "WHEN a.kind = 'credit_card' AND t.amount_base > 0 AND t.direction <> 'payment' THEN t.amount_base"
     );
+    expect(sql).toContain(
+      "WHEN a.kind = 'credit_card' AND t.direction = 'payment' THEN ABS(t.amount_base)"
+    );
+    expect(sql).toContain('COALESCE(SUM(card_payments), 0)::text AS card_payments');
   });
 
   it('classifies asset-account deposits as inflow and withdrawals as outflow', () => {

@@ -33,6 +33,9 @@ All notable changes to Ledger are documented here.
 
 ### Changed
 
+- Kept credit-card payments neutral in cash-flow net totals while exposing them
+  as a separate chart series, so payment activity remains visible without
+  double-counting the underlying card spending.
 - Made account balances and cash flow account-kind-aware, preserved native
   positions beside derived base values, and excluded unverifiable accounts from
   net worth with explicit partial-state reasons. Non-null `ok`, `gap`, and

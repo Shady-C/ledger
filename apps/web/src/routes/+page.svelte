@@ -245,7 +245,7 @@
       <div class="panel-heading">
         <div>
           <h2>Cash flow</h2>
-          <p>{latestCashflow ? `Latest net ${money(latestCashflow.net, cashflow.currency)}.` : 'Monthly inflows and outflows.'}</p>
+          <p>{latestCashflow ? `Latest net ${money(latestCashflow.net, cashflow.currency)}. Card payments shown separately.` : 'Monthly inflows, outflows, and card payments.'}</p>
         </div>
         <span class="pill">{cashflow.currency}</span>
       </div>
