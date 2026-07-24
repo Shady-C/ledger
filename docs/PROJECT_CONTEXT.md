@@ -130,7 +130,7 @@ payments, credits, and refunds are negative. Reconciliation uses:
 | 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | In review |
 | 2 | Deep analytics, anomalies, recurring detection | Not started |
 | 3 | Grounded natural-language query layer | Not started |
-| 4 | Ingestion hardening, offline polish, forecasts | Not started |
+| 4 | Ingestion hardening, adapter review/schema evolution, offline polish, forecasts | Not started |
 
 ## Key Design Decisions
 
@@ -167,3 +167,7 @@ stored raw files unreadable.
   scope deviation.
 - Record material deviations in `docs/decisions/` and `CHANGELOG.md`.
 - Never use an LLM for arithmetic or allow one to write directly to the ledger.
+- Let AI propose translations from novel statements into the canonical model,
+  but require an ADR, migration, deterministic rules, fixtures, and tests when
+  a genuinely new financial concept requires the canonical model itself to
+  change.

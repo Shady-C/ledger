@@ -329,6 +329,46 @@ and reconciliation. Only a valid mapping is persisted as an `ADAPTER`; invalid
 output writes no financial rows and returns `needs_ai`. Every future matching
 file is then deterministic and provider-free.
 
+### Compatibility learning and canonical-schema evolution
+
+The learning layer adapts source statements to Ledger; it does not let a model
+silently mutate Ledger's financial schema. A new statement follows this
+compatibility ladder:
+
+1. **Known structure:** a fingerprint matches a saved adapter. Parse locally
+   with no provider call.
+2. **New layout, known concepts:** the file contains the canonical concepts
+   Ledger already understands, but uses different headers, ordering, date
+   notation, decimal notation, or debit/credit representation. AI may propose
+   the column correspondence; local code derives financial semantics, parses
+   every row, verifies account and currency compatibility, and reconciles the
+   statement before versioning and caching the adapter.
+3. **Ambiguous or invalid layout:** required evidence is missing, multiple
+   interpretations remain plausible, or reconciliation fails. Write no
+   statement or transaction rows, preserve the encrypted source, and return
+   `needs_ai` with a reason suitable for a mapping-review surface.
+4. **New financial concept:** the statement contains information the canonical
+   model cannot represent without loss (for example, multiple balances with
+   distinct meanings, installment-plan state, or a new account/product type).
+   AI may produce a structured compatibility report, but it may not add a
+   column, migration, account kind, or arithmetic rule. Schema evolution
+   requires an ADR, migration, deterministic parser/normalizer changes,
+   sanitized fixtures, reconciliation tests, and an adapter version bump before
+   the retained source is replayed.
+
+The persisted learning unit is an adapter identified by institution, file
+format, structural fingerprint, account kind, and native currency. Transaction
+values and descriptions are not part of the fingerprint. A changed bank export
+therefore creates a new adapter version instead of weakening a known mapping.
+Adapters must remain inspectable, reversible, and auditable: record the
+fingerprint, mapping, version, validation outcome, creation source, and
+supersession relationship.
+
+Phase 1 implements the known-structure and validated new-layout paths and fails
+closed to `needs_ai`. A user-facing mapping editor/approval flow, compatibility
+reports for genuinely new concepts, adapter rollback/supersession controls, and
+safe replay after schema evolution belong to Phase 4 ingestion hardening.
+
 ### Idempotency, dedup, reconciliation
 - **Upsert on `dedup_hash`.** New hash → insert. Seen hash → skip (report as "already recorded").
 - **OFX identity:** the statement FITID is stored as `external_ref`; an OFX-only
