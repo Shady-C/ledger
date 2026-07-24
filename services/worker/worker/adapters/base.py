@@ -161,7 +161,18 @@ def infer_direction(description: str, amount: Decimal) -> Direction:
     normalized = normalize_header(description)
     if "interest" in normalized:
         return Direction.INTEREST
-    if any(token in normalized for token in ("annual fee", "late fee", "service fee")):
+    if any(
+        token in normalized
+        for token in (
+            "annual fee",
+            "late fee",
+            "service fee",
+            "foreign exchange fee",
+            "fx fee",
+            "currency conversion fee",
+            "commission",
+        )
+    ):
         return Direction.FEE
     if any(token in normalized for token in ("payment", "autopay", "thank you")):
         return Direction.PAYMENT
@@ -234,6 +245,42 @@ def extract_statement_metadata(
         currency=currency,
         account_ref_masked=account_ref,
     )
+
+
+def statement_currency_evidence(rows: Sequence[Sequence[object]]) -> str | None:
+    """Return an explicitly labelled statement/balance currency, if present."""
+
+    currencies: set[str] = set()
+    for row in rows:
+        cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+        if not cells:
+            continue
+        joined = " ".join(cells)
+        normalized = normalize_header(joined)
+        if "currency" not in normalized and "balance" not in normalized:
+            continue
+        currencies.update(
+            match.upper()
+            for match in re.findall(r"\b(CAD|USD|TZS)\b", joined, re.IGNORECASE)
+        )
+    if len(currencies) > 1:
+        raise AdapterError("statement preamble contains conflicting currency labels")
+    return next(iter(currencies), None)
+
+
+def parse_optional_flag(value: object | None, *, field: str) -> bool | None:
+    """Parse an optional explicit tabular yes/no flag without guessing."""
+
+    if value is None or not str(value).strip():
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = normalize_header(value)
+    if normalized in {"1", "true", "yes", "y", "standalone", "fx fee"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "inline", "not fx fee"}:
+        return False
+    raise AdapterError(f"{field} must contain an explicit yes/no value")
 
 
 def metadata_with_row_dates(

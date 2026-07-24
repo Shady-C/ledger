@@ -17,7 +17,7 @@ from worker.ai_categorization import (
     CategoryOption,
     UnresolvedMerchantFlow,
 )
-from worker.fx import FXRequirement, MissingFXRateError
+from worker.fx import FXRequirement
 from worker.models import (
     AccountKind,
     CanonicalTransaction,
@@ -59,6 +59,7 @@ class PersistResult:
     skipped: int
     reconcile_status: str
     coverage_gaps: tuple[StatementPeriod, ...] = ()
+    updated: int = 0
 
 
 @dataclass(slots=True)
@@ -93,6 +94,8 @@ class LedgerRepository(Protocol):
     def enqueue_categorization_job(self) -> None: ...
 
     def enqueue_fx_refresh_job(self, *, target_base_currency: str) -> None: ...
+
+    def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None: ...
 
     def persist_statement(
         self,
@@ -215,27 +218,32 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 """
                 UPDATE job
                 SET status = CASE
-                        WHEN kind IN ('categorize', 'fx_refresh')
+                        WHEN kind IN ('categorize', 'fx_refresh', 'analytics_refresh')
                          AND payload @> '{"rerun_requested": true}'::jsonb
                         THEN 'queued'
                         ELSE %s
                     END,
-                    payload = payload - 'rerun_requested',
+                    payload = CASE
+                        WHEN kind = 'analytics_refresh'
+                         AND payload @> '{"rerun_requested": true}'::jsonb
+                        THEN payload - 'rerun_requested' - 'analytics_run_id' - 'generation'
+                        ELSE payload - 'rerun_requested'
+                    END,
                     result = CASE
-                        WHEN kind IN ('categorize', 'fx_refresh')
+                        WHEN kind IN ('categorize', 'fx_refresh', 'analytics_refresh')
                          AND payload @> '{"rerun_requested": true}'::jsonb
                         THEN NULL
                         ELSE %s
                     END,
                     error = NULL,
                     claimed_at = CASE
-                        WHEN kind IN ('categorize', 'fx_refresh')
+                        WHEN kind IN ('categorize', 'fx_refresh', 'analytics_refresh')
                          AND payload @> '{"rerun_requested": true}'::jsonb
                         THEN NULL
                         ELSE claimed_at
                     END,
                     finished_at = CASE
-                        WHEN kind IN ('categorize', 'fx_refresh')
+                        WHEN kind IN ('categorize', 'fx_refresh', 'analytics_refresh')
                          AND payload @> '{"rerun_requested": true}'::jsonb
                         THEN NULL
                         ELSE now()
@@ -607,6 +615,17 @@ class PostgresRepository(LedgerRepository, JobRepository):
             match_payload=payload,
         )
 
+    def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None:
+        if mode not in {"full", "incremental"}:
+            raise ValueError("analytics refresh mode must be full or incremental")
+        self._enqueue_followup_job(
+            kind="analytics_refresh",
+            payload={"mode": mode},
+            deduplication_key="analytics-refresh:ledger",
+            match_payload=None,
+            merge_payload=mode == "full",
+        )
+
     def _enqueue_followup_job(
         self,
         *,
@@ -614,16 +633,24 @@ class PostgresRepository(LedgerRepository, JobRepository):
         payload: dict[str, object],
         deduplication_key: str,
         match_payload: dict[str, object] | None,
+        merge_payload: bool = False,
     ) -> None:
         """Coalesce work without losing an enqueue racing a claimed scan."""
 
         payload_filter = "" if match_payload is None else "AND payload @> %s"
+        payload_merge = "payload || %s ||" if merge_payload else "payload ||"
         update_parameters: tuple[object, ...] = (
-            (kind,) if match_payload is None else (kind, Jsonb(match_payload))
+            (Jsonb(payload), kind)
+            if merge_payload and match_payload is None
+            else (Jsonb(payload), kind, Jsonb(match_payload))
+            if merge_payload
+            else (kind,)
+            if match_payload is None
+            else (kind, Jsonb(match_payload))
         )
         update = f"""
             UPDATE job
-            SET payload = payload || '{{"rerun_requested": true}}'::jsonb,
+            SET payload = {payload_merge} '{{"rerun_requested": true}}'::jsonb,
                 updated_at = now()
             WHERE kind = %s
               AND status IN ('queued', 'claimed')
@@ -673,14 +700,13 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 WHERE native_currency <> %s
                 UNION
                 SELECT DISTINCT
-                    upper(enrichment #>> '{foreign_spend,currency}') AS base,
+                    original_currency AS base,
                     currency_native AS quote,
                     booked_date AS as_of
                 FROM txn
-                WHERE upper(enrichment #>> '{foreign_spend,currency}') ~ '^[A-Z]{3}$'
-                  AND (enrichment #>> '{foreign_spend,amount}')
-                        ~ '^-?[0-9]+([.][0-9]+)?$'
-                  AND upper(enrichment #>> '{foreign_spend,currency}') <> currency_native
+                WHERE original_amount IS NOT NULL
+                  AND original_currency IS NOT NULL
+                  AND original_currency <> currency_native
                 ORDER BY base, as_of
                 """,
                 (target, target, target, target, target, target, target, target),
@@ -692,79 +718,35 @@ class PostgresRepository(LedgerRepository, JobRepository):
 
     def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int:
         target = _currency_code(target_currency)
+        if target != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
         if not 0 <= max_staleness_days <= 7:
             raise ValueError("max_staleness_days must be between 0 and 7")
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext('ledger-base-currency'))")
             cursor.execute(
                 """
-                WITH requirement AS (
-                    SELECT DISTINCT
-                        currency_native AS base, %s::text AS quote, booked_date AS as_of
-                    FROM txn
-                    WHERE currency_native <> %s
-                    UNION
-                    SELECT DISTINCT
-                        currency AS base, %s::text AS quote, period_start AS as_of
-                    FROM statement
-                    WHERE currency <> %s AND opening_balance IS NOT NULL
-                    UNION
-                    SELECT DISTINCT
-                        currency AS base, %s::text AS quote, period_end AS as_of
-                    FROM statement
-                    WHERE currency <> %s AND closing_balance IS NOT NULL
-                    UNION
-                    SELECT DISTINCT
-                        native_currency AS base, %s::text AS quote, CURRENT_DATE AS as_of
-                    FROM account
-                    WHERE native_currency <> %s
-                    UNION
-                    SELECT DISTINCT
-                        upper(enrichment #>> '{foreign_spend,currency}') AS base,
-                        currency_native AS quote,
-                        booked_date AS as_of
-                    FROM txn
-                    WHERE upper(enrichment #>> '{foreign_spend,currency}') ~ '^[A-Z]{3}$'
-                      AND (enrichment #>> '{foreign_spend,amount}')
-                            ~ '^-?[0-9]+([.][0-9]+)?$'
-                      AND upper(enrichment #>> '{foreign_spend,currency}')
-                            <> currency_native
-                )
-                SELECT count(*) AS missing
-                FROM requirement
-                WHERE NOT EXISTS (
-                      SELECT 1
-                      FROM fx_rate
-                      WHERE fx_rate.base = requirement.base
-                        AND fx_rate.quote = requirement.quote
-                        AND as_of BETWEEN
-                            requirement.as_of - make_interval(days => %s)
-                            AND requirement.as_of
-                  )
-                """,
-                (
-                    target,
-                    target,
-                    target,
-                    target,
-                    target,
-                    target,
-                    target,
-                    target,
-                    max_staleness_days,
-                ),
-            )
-            missing = cursor.fetchone()
-            if missing is None or int(missing["missing"]) > 0:
-                raise MissingFXRateError("base-currency rebuild is missing one or more rates")
-            cursor.execute(
-                """
                 WITH valuation AS (
                     SELECT
                         txn.id,
-                        COALESCE(rate.rate, 1::numeric) AS rate,
-                        COALESCE(rate.as_of, txn.booked_date) AS rate_date,
-                        COALESCE(rate.source, 'identity') AS source
+                        CASE
+                            WHEN txn.currency_native = 'CAD' THEN 1
+                            ELSE COALESCE(rate.rate, txn.fx_rate)
+                        END AS rate,
+                        CASE
+                            WHEN txn.currency_native = 'CAD' THEN txn.booked_date
+                            ELSE COALESCE(rate.as_of, txn.fx_rate_date)
+                        END AS rate_date,
+                        CASE
+                            WHEN txn.currency_native = 'CAD' THEN 'identity'
+                            ELSE COALESCE(rate.source, txn.enrichment ->> 'fx_source')
+                        END AS source,
+                        CASE
+                            WHEN txn.currency_native = 'CAD' THEN txn.amount_native
+                            WHEN rate.rate IS NOT NULL
+                                THEN round(txn.amount_native * rate.rate, 2)
+                            ELSE txn.amount_base
+                        END AS amount_base
                     FROM txn
                     LEFT JOIN LATERAL (
                         SELECT fx_rate.rate, fx_rate.as_of, fx_rate.source
@@ -779,21 +761,45 @@ class PostgresRepository(LedgerRepository, JobRepository):
                     ) AS rate ON txn.currency_native <> %s
                 )
                 UPDATE txn
-                SET amount_base = round(txn.amount_native * valuation.rate, 2),
-                    currency_base = %s,
+                SET amount_base = valuation.amount_base,
+                    currency_base = 'CAD',
                     fx_rate = valuation.rate,
                     fx_rate_date = valuation.rate_date,
-                    enrichment = jsonb_set(
-                        txn.enrichment,
-                        '{fx_source}',
-                        to_jsonb(valuation.source::text),
-                        true
-                    ),
+                    enrichment = CASE
+                        WHEN valuation.source IS NULL THEN txn.enrichment - 'fx_source'
+                        ELSE jsonb_set(
+                            txn.enrichment,
+                            '{fx_source}',
+                            to_jsonb(valuation.source::text),
+                            true
+                        )
+                    END,
                     updated_at = now()
                 FROM valuation
                 WHERE txn.id = valuation.id
+                  AND (
+                      txn.amount_base,
+                      txn.currency_base,
+                      txn.fx_rate,
+                      txn.fx_rate_date,
+                      txn.enrichment
+                  ) IS DISTINCT FROM (
+                      valuation.amount_base,
+                      'CAD'::text,
+                      valuation.rate,
+                      valuation.rate_date,
+                      CASE
+                          WHEN valuation.source IS NULL THEN txn.enrichment - 'fx_source'
+                          ELSE jsonb_set(
+                              txn.enrichment,
+                              '{fx_source}',
+                              to_jsonb(valuation.source::text),
+                              true
+                          )
+                      END
+                  )
                 """,
-                (target, max_staleness_days, target, target),
+                (target, max_staleness_days, target),
             )
             rebuilt = cursor.rowcount
             cursor.execute(
@@ -802,7 +808,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 SET base_currency = %s, updated_at = now()
                 WHERE singleton
                 """,
-                (target,),
+                ("CAD",),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("ledger settings are not initialized")
@@ -835,7 +841,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 account_id=account_id,
                 discovered=metadata.account_ref_masked,
             )
-            statement_id, arithmetic_status = self._get_or_create_statement(
+            statement_id, arithmetic_status, statement_updated = self._get_or_create_statement(
                 cursor,
                 account_id=account_id,
                 source_file_key=source_file_key,
@@ -843,8 +849,10 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 reconcile_status=reconciliation.status,
             )
             added = 0
+            updated = int(statement_updated)
             for row in rows:
                 if self._existing_ofx_transaction_matches(cursor, account_id=account_id, row=row):
+                    updated += int(self._refresh_transaction_metadata(cursor, row=row))
                     continue
                 merchant_id = self._merchant_id(cursor, row.merchant_name, row.merchant_key)
                 flow_type = _canonical_flow_type(row)
@@ -871,12 +879,14 @@ class PostgresRepository(LedgerRepository, JobRepository):
                     INSERT INTO txn (
                         account_id, statement_id, booked_date, posted_date,
                         description_raw, merchant_id, category_id,
-                        amount_native, currency_native, amount_base, currency_base,
+                        amount_native, currency_native, original_amount,
+                        original_currency, fx_fee_amount_native, is_fx_fee,
+                        amount_base, currency_base,
                         fx_rate, fx_rate_date, external_ref, dedup_hash, direction,
                         enrichment, category_source, category_confidence
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (dedup_hash) DO NOTHING
                     RETURNING id
@@ -891,6 +901,10 @@ class PostgresRepository(LedgerRepository, JobRepository):
                         category_id,
                         row.amount_native,
                         row.currency_native,
+                        row.original_amount,
+                        row.original_currency,
+                        row.fx_fee_amount_native,
+                        row.is_fx_fee,
                         row.amount_base,
                         row.currency_base,
                         row.fx_rate,
@@ -906,7 +920,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 if cursor.fetchone() is not None:
                     added += 1
                 else:
-                    self._refresh_transaction_metadata(cursor, row=row)
+                    updated += int(self._refresh_transaction_metadata(cursor, row=row))
             reconcile_status, gaps = self._refresh_coverage(
                 cursor,
                 account_id=account_id,
@@ -919,6 +933,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
             skipped=len(rows) - added,
             reconcile_status=reconcile_status,
             coverage_gaps=gaps,
+            updated=updated,
         )
 
     @staticmethod
@@ -929,53 +944,88 @@ class PostgresRepository(LedgerRepository, JobRepository):
         source_file_key: str,
         metadata: StatementMetadata,
         reconcile_status: str,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, bool]:
         cursor.execute(
             """
-            INSERT INTO statement (
-                account_id, period_start, period_end, opening_balance,
-                closing_balance, currency, source_file_key, reconcile_status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (account_id, source_file_key) DO UPDATE
-            SET period_start = EXCLUDED.period_start,
-                period_end = EXCLUDED.period_end,
-                opening_balance = CASE
-                    WHEN EXCLUDED.opening_balance IS NULL
-                      OR EXCLUDED.closing_balance IS NULL
-                    THEN statement.opening_balance
-                    ELSE EXCLUDED.opening_balance
-                END,
-                closing_balance = CASE
-                    WHEN EXCLUDED.opening_balance IS NULL
-                      OR EXCLUDED.closing_balance IS NULL
-                    THEN statement.closing_balance
-                    ELSE EXCLUDED.closing_balance
-                END,
-                currency = EXCLUDED.currency,
-                reconcile_status = CASE
-                    WHEN EXCLUDED.opening_balance IS NULL
-                      OR EXCLUDED.closing_balance IS NULL
-                    THEN statement.reconcile_status
-                    ELSE EXCLUDED.reconcile_status
-                END,
-                updated_at = now()
-            RETURNING id::text AS id, reconcile_status
+            SELECT id::text AS id, period_start, period_end, opening_balance,
+                   closing_balance, currency, reconcile_status
+            FROM statement
+            WHERE account_id = %s AND source_file_key = %s
+            FOR UPDATE
             """,
-            (
-                account_id,
-                metadata.period_start,
-                metadata.period_end,
-                metadata.opening_balance,
-                metadata.closing_balance,
-                metadata.currency,
-                source_file_key,
-                reconcile_status,
-            ),
+            (account_id, source_file_key),
         )
-        created = cursor.fetchone()
-        if created is None:
-            raise RuntimeError("statement insert did not return an id")
-        return str(created["id"]), str(created["reconcile_status"])
+        existing = cursor.fetchone()
+        if existing is None:
+            cursor.execute(
+                """
+                INSERT INTO statement (
+                    account_id, period_start, period_end, opening_balance,
+                    closing_balance, currency, source_file_key, reconcile_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id::text AS id
+                """,
+                (
+                    account_id,
+                    metadata.period_start,
+                    metadata.period_end,
+                    metadata.opening_balance,
+                    metadata.closing_balance,
+                    metadata.currency,
+                    source_file_key,
+                    reconcile_status,
+                ),
+            )
+            created = cursor.fetchone()
+            if created is None:
+                raise RuntimeError("statement insert did not return an id")
+            return str(created["id"]), reconcile_status, True
+
+        has_complete_balances = (
+            metadata.opening_balance is not None and metadata.closing_balance is not None
+        )
+        opening_balance = (
+            metadata.opening_balance if has_complete_balances else existing["opening_balance"]
+        )
+        closing_balance = (
+            metadata.closing_balance if has_complete_balances else existing["closing_balance"]
+        )
+        arithmetic_status = (
+            reconcile_status if has_complete_balances else str(existing["reconcile_status"])
+        )
+        changed = any(
+            (
+                existing["period_start"] != metadata.period_start,
+                existing["period_end"] != metadata.period_end,
+                existing["opening_balance"] != opening_balance,
+                existing["closing_balance"] != closing_balance,
+                str(existing["currency"]) != metadata.currency,
+            )
+        )
+        if changed:
+            cursor.execute(
+                """
+                UPDATE statement
+                SET period_start = %s,
+                    period_end = %s,
+                    opening_balance = %s,
+                    closing_balance = %s,
+                    currency = %s,
+                    reconcile_status = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    metadata.period_start,
+                    metadata.period_end,
+                    opening_balance,
+                    closing_balance,
+                    metadata.currency,
+                    arithmetic_status,
+                    existing["id"],
+                ),
+            )
+        return str(existing["id"]), arithmetic_status, changed
 
     @staticmethod
     def _sync_account_reference(
@@ -1007,26 +1057,78 @@ class PostgresRepository(LedgerRepository, JobRepository):
         cursor: psycopg.Cursor[Any],
         *,
         row: CanonicalTransaction,
-    ) -> None:
-        """Fill parser metadata omitted by an older import without changing money truth."""
+    ) -> bool:
+        """Fill source metadata omitted by an older import without changing posted truth."""
 
-        if row.posted_date is None:
-            return
         cursor.execute(
-            "SELECT posted_date FROM txn WHERE dedup_hash = %s FOR UPDATE",
+            """
+            SELECT posted_date, original_amount, original_currency,
+                   fx_fee_amount_native, is_fx_fee
+            FROM txn
+            WHERE dedup_hash = %s
+            FOR UPDATE
+            """,
             (row.dedup_hash,),
         )
         existing = cursor.fetchone()
         if existing is None:
             raise RuntimeError("conflicting transaction disappeared during metadata refresh")
         posted_date = existing["posted_date"]
-        if posted_date is not None and posted_date != row.posted_date:
+        if (
+            row.posted_date is not None
+            and posted_date is not None
+            and posted_date != row.posted_date
+        ):
             raise ValueError("statement processed date conflicts with an existing transaction")
-        if posted_date is None:
-            cursor.execute(
-                "UPDATE txn SET posted_date = %s, updated_at = now() WHERE dedup_hash = %s",
-                (row.posted_date, row.dedup_hash),
+        existing_original = existing["original_amount"]
+        existing_original_currency = existing["original_currency"]
+        if row.original_amount is not None and existing_original is not None and (
+            existing_original != row.original_amount
+            or str(existing_original_currency) != row.original_currency
+        ):
+            raise ValueError("original-currency evidence conflicts with an existing transaction")
+        existing_fee = existing["fx_fee_amount_native"]
+        if (
+            row.fx_fee_amount_native is not None
+            and existing_fee is not None
+            and existing_fee != row.fx_fee_amount_native
+        ):
+            raise ValueError("FX-fee evidence conflicts with an existing transaction")
+        if bool(existing["is_fx_fee"]) and row.fx_fee_amount_native is not None:
+            raise ValueError("standalone and inline FX-fee evidence conflict")
+        if row.is_fx_fee and existing_fee is not None:
+            raise ValueError("standalone and inline FX-fee evidence conflict")
+        changed = any(
+            (
+                posted_date is None and row.posted_date is not None,
+                existing_original is None and row.original_amount is not None,
+                existing_fee is None and row.fx_fee_amount_native is not None,
+                not bool(existing["is_fx_fee"]) and row.is_fx_fee,
             )
+        )
+        if not changed:
+            return False
+        cursor.execute(
+            """
+            UPDATE txn
+            SET posted_date = COALESCE(posted_date, %s),
+                original_amount = COALESCE(original_amount, %s),
+                original_currency = COALESCE(original_currency, %s),
+                fx_fee_amount_native = COALESCE(fx_fee_amount_native, %s),
+                is_fx_fee = is_fx_fee OR %s,
+                updated_at = now()
+            WHERE dedup_hash = %s
+            """,
+            (
+                row.posted_date,
+                row.original_amount,
+                row.original_currency,
+                row.fx_fee_amount_native,
+                row.is_fx_fee,
+                row.dedup_hash,
+            ),
+        )
+        return True
 
     @staticmethod
     def _existing_ofx_transaction_matches(
@@ -1271,11 +1373,14 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         self._assert_lease(job)
         active = self._inflight[job.id][0]
         if (
-            active.kind in {"categorize", "fx_refresh"}
+            active.kind in {"categorize", "fx_refresh", "analytics_refresh"}
             and active.payload.get("rerun_requested") is True
         ):
             payload = dict(active.payload)
             payload.pop("rerun_requested", None)
+            if active.kind == "analytics_refresh":
+                payload.pop("analytics_run_id", None)
+                payload.pop("generation", None)
             self.jobs.append(replace(active, payload=payload, claim_token=None))
             del self._inflight[job.id]
             return
@@ -1430,7 +1535,33 @@ class InMemoryRepository(LedgerRepository, JobRepository):
             )
         )
 
-    def _request_active_rerun(self, *, kind: str, match_payload: dict[str, object] | None) -> bool:
+    def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None:
+        if mode not in {"full", "incremental"}:
+            raise ValueError("analytics refresh mode must be full or incremental")
+        payload_update: dict[str, object] | None = (
+            {"mode": "full"} if mode == "full" else None
+        )
+        if self._request_active_rerun(
+            kind="analytics_refresh",
+            match_payload=None,
+            payload_update=payload_update,
+        ):
+            return
+        self.jobs.append(
+            Job(
+                id=f"analytics-refresh-{uuid4()}",
+                kind="analytics_refresh",
+                payload={"mode": mode},
+            )
+        )
+
+    def _request_active_rerun(
+        self,
+        *,
+        kind: str,
+        match_payload: dict[str, object] | None,
+        payload_update: dict[str, object] | None = None,
+    ) -> bool:
         def matches(job: Job) -> bool:
             return job.kind == kind and (
                 match_payload is None
@@ -1439,12 +1570,20 @@ class InMemoryRepository(LedgerRepository, JobRepository):
 
         for index, queued in enumerate(self.jobs):
             if matches(queued):
-                payload = {**queued.payload, "rerun_requested": True}
+                payload = {
+                    **queued.payload,
+                    **(payload_update or {}),
+                    "rerun_requested": True,
+                }
                 self.jobs[index] = replace(queued, payload=payload)
                 return True
         for job_id, (claimed, claimed_at) in tuple(self._inflight.items()):
             if matches(claimed):
-                payload = {**claimed.payload, "rerun_requested": True}
+                payload = {
+                    **claimed.payload,
+                    **(payload_update or {}),
+                    "rerun_requested": True,
+                }
                 self._inflight[job_id] = (replace(claimed, payload=payload), claimed_at)
                 return True
         return False
@@ -1480,26 +1619,26 @@ class InMemoryRepository(LedgerRepository, JobRepository):
             if currency != target_currency
         )
         for row in self.transactions.values():
-            foreign = row.enrichment.get("foreign_spend")
-            if not isinstance(foreign, dict):
-                continue
-            currency = foreign.get("currency")
-            amount = foreign.get("amount")
             if (
-                isinstance(currency, str)
-                and len(currency) == 3
-                and currency.isalpha()
-                and currency != row.currency_native
-                and isinstance(amount, str)
+                row.original_currency is not None
+                and row.original_amount is not None
+                and row.original_currency != row.currency_native
             ):
                 requirements.add(
-                    FXRequirement(currency.upper(), row.currency_native, row.booked_date)
+                    FXRequirement(
+                        row.original_currency,
+                        row.currency_native,
+                        row.booked_date,
+                    )
                 )
         return tuple(sorted(requirements, key=lambda item: (item.base, item.quote, item.as_of)))
 
     def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int:
         del max_staleness_days
-        self.base_currency = _currency_code(target_currency)
+        target = _currency_code(target_currency)
+        if target != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+        self.base_currency = "CAD"
         return len(self.transactions)
 
     def expire_lease_for_test(self, job_id: str) -> None:
@@ -1545,14 +1684,21 @@ class InMemoryRepository(LedgerRepository, JobRepository):
             )
             effective_reconciliation = existing_statement.reconciliation
             effective_status = existing_statement.status
-        self.statements[statement_id] = MemoryStatement(
+        next_statement = MemoryStatement(
             account_id=account_id,
             metadata=merged_metadata,
             period=StatementPeriod(metadata.period_start, metadata.period_end),
             reconciliation=effective_reconciliation,
             status=effective_status,
         )
+        statement_updated = existing_statement is None or (
+            existing_statement.metadata != next_statement.metadata
+            or existing_statement.period != next_statement.period
+            or existing_statement.reconciliation != next_statement.reconciliation
+        )
+        self.statements[statement_id] = next_statement
         added = 0
+        updated = int(statement_updated)
         for row in rows:
             if self._existing_memory_ofx_transaction(account_id=account_id, row=row):
                 continue
@@ -1574,6 +1720,43 @@ class InMemoryRepository(LedgerRepository, JobRepository):
                     self.transactions[persisted_row.dedup_hash] = existing.model_copy(
                         update={"posted_date": persisted_row.posted_date}
                     )
+                    updated += 1
+            if existing is not None:
+                current = self.transactions[persisted_row.dedup_hash]
+                updates: dict[str, object] = {}
+                if current.original_amount is None and persisted_row.original_amount is not None:
+                    updates["original_amount"] = persisted_row.original_amount
+                    updates["original_currency"] = persisted_row.original_currency
+                elif (
+                    persisted_row.original_amount is not None
+                    and (
+                        current.original_amount != persisted_row.original_amount
+                        or current.original_currency != persisted_row.original_currency
+                    )
+                ):
+                    raise ValueError(
+                        "original-currency evidence conflicts with an existing transaction"
+                    )
+                if (
+                    current.fx_fee_amount_native is None
+                    and persisted_row.fx_fee_amount_native is not None
+                ):
+                    updates["fx_fee_amount_native"] = persisted_row.fx_fee_amount_native
+                elif (
+                    persisted_row.fx_fee_amount_native is not None
+                    and current.fx_fee_amount_native != persisted_row.fx_fee_amount_native
+                ):
+                    raise ValueError("FX-fee evidence conflicts with an existing transaction")
+                if persisted_row.is_fx_fee:
+                    if current.fx_fee_amount_native is not None:
+                        raise ValueError("standalone and inline FX-fee evidence conflict")
+                    updates["is_fx_fee"] = True
+                if updates:
+                    self.transactions[persisted_row.dedup_hash] = current.model_copy(
+                        update=updates
+                    )
+                    if existing.posted_date is not None or persisted_row.posted_date is None:
+                        updated += 1
         records = [
             (
                 existing_id,
@@ -1587,11 +1770,12 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         for existing_id, status in statuses.items():
             self.statements[existing_id].status = status
         return PersistResult(
-            statement_id,
-            added,
-            len(rows) - added,
-            statuses[statement_id],
-            gaps,
+            statement_id=statement_id,
+            added=added,
+            skipped=len(rows) - added,
+            reconcile_status=statuses[statement_id],
+            coverage_gaps=gaps,
+            updated=updated,
         )
 
     def _apply_memory_merchant_mapping(self, row: CanonicalTransaction) -> CanonicalTransaction:

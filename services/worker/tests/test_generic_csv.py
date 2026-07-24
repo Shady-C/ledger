@@ -151,3 +151,151 @@ def test_multiple_alias_columns_fail_closed(
 ) -> None:
     with pytest.raises(AdapterError, match=rf"ambiguous {field} columns"):
         GenericCsvAdapter().parse_tabular_rows([headers, values])
+
+
+def test_parses_original_currency_inline_fee_and_asset_flow_sign() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Original Amount,Original Currency,FX Fee\n"
+        b"2026-01-03,Synthetic USD purchase,270000.00,,TZS,100.00,USD,5000.00\n"
+    )
+
+    result = GenericCsvAdapter().parse(
+        ParsedFile(name="tzs.csv", content=content),
+        account_kind=AccountKind.CHEQUING,
+    )
+
+    row = result.rows[0]
+    assert row.amount_native == Decimal("-270000.00")
+    assert row.currency_native == "TZS"
+    assert row.original_amount == Decimal("-100.00")
+    assert row.original_currency == "USD"
+    assert row.fx_fee_amount_native == Decimal("5000.00")
+    assert row.is_fx_fee is False
+
+
+def test_asset_statement_recognizes_standalone_fx_fee_row() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency\n"
+        b"2026-01-03,Foreign exchange fee,15.00,,USD\n"
+    )
+
+    row = GenericCsvAdapter().parse(
+        ParsedFile(name="usd.csv", content=content),
+        account_kind=AccountKind.CHEQUING,
+    ).rows[0]
+
+    assert row.amount_native == Decimal("-15.00")
+    assert row.direction is Direction.FEE
+    assert row.is_fx_fee is True
+    assert row.fx_fee_amount_native is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        b"2026-01-03,Synthetic,10.00,,TZS,5.00,\n",
+        b"2026-01-03,Synthetic,10.00,,TZS,,USD\n",
+    ],
+)
+def test_original_amount_and_currency_must_be_present_together(row: bytes) -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Original Amount,Original Currency\n"
+        + row
+    )
+
+    with pytest.raises(AdapterError, match="must both be present"):
+        GenericCsvAdapter().parse(
+            ParsedFile(name="malformed.csv", content=content),
+            account_kind=AccountKind.CHEQUING,
+        )
+
+
+def test_mixed_posted_currencies_require_separate_accounts() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency\n"
+        b"2026-01-03,Synthetic TZS,100.00,,TZS\n"
+        b"2026-01-04,Synthetic USD,1.00,,USD\n"
+    )
+
+    with pytest.raises(AdapterError, match="mixes multiple native currencies"):
+        GenericCsvAdapter().parse(
+            ParsedFile(name="mixed.csv", content=content),
+            account_kind=AccountKind.CHEQUING,
+        )
+
+
+def test_explicit_standalone_fx_fee_flag_is_authoritative() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Is FX Fee\n"
+        b"2026-01-03,Synthetic bank charge,15.00,,USD,yes\n"
+    )
+
+    row = GenericCsvAdapter().parse(
+        ParsedFile(name="explicit-fee.csv", content=content),
+        account_kind=AccountKind.CHEQUING,
+    ).rows[0]
+
+    assert row.is_fx_fee is True
+    assert row.direction is Direction.FEE
+    assert row.fx_fee_amount_native is None
+
+
+def test_standalone_fx_fee_with_matching_fee_column_is_not_treated_as_inline() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency,FX Fee\n"
+        b"2026-01-03,Foreign exchange fee,15.00,,USD,15.00\n"
+    )
+
+    row = GenericCsvAdapter().parse(
+        ParsedFile(name="fee-column.csv", content=content),
+        account_kind=AccountKind.CHEQUING,
+    ).rows[0]
+
+    assert row.is_fx_fee is True
+    assert row.fx_fee_amount_native is None
+
+
+def test_general_bank_commission_is_not_misreported_as_fx() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency\n"
+        b"2026-01-03,General bank commission,15.00,,USD\n"
+    )
+
+    row = GenericCsvAdapter().parse(
+        ParsedFile(name="commission.csv", content=content),
+        account_kind=AccountKind.CHEQUING,
+    ).rows[0]
+
+    assert row.is_fx_fee is False
+
+
+def test_explicit_balance_currency_cannot_be_overwritten_by_row_currency() -> None:
+    content = (
+        b"Currency,TZS\n"
+        b"Opening Balance,1000.00 TZS\n"
+        b"Date,Description,Debit,Credit,Currency\n"
+        b"2026-01-03,Synthetic,10.00,,USD\n"
+    )
+
+    with pytest.raises(AdapterError, match="balance currency differs"):
+        GenericCsvAdapter().parse(
+            ParsedFile(name="wrong-balance-currency.csv", content=content),
+            account_kind=AccountKind.CHEQUING,
+        )
+
+
+def test_usd_posted_tzs_original_refund_keeps_matching_flow_sign() -> None:
+    content = (
+        b"Date,Description,Amount,Currency,Original Amount,Original Currency\n"
+        b"2026-01-03,Foreign purchase refund,-10.00,USD,25000.00,TZS\n"
+    )
+
+    row = GenericCsvAdapter().parse(
+        ParsedFile(name="refund.csv", content=content),
+        account_kind=AccountKind.CREDIT_CARD,
+    ).rows[0]
+
+    assert row.amount_native == Decimal("-10.00")
+    assert row.original_amount == Decimal("-25000.00")
+    assert row.original_currency == "TZS"
+    assert row.direction is Direction.REFUND

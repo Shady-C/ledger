@@ -8,15 +8,22 @@ import threading
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Protocol
+from uuid import UUID
 
 from pydantic import ValidationError
 
-from worker.adapters import AmexXlsxAdapter, GenericCsvAdapter, OfxAdapter, PdfTableAdapter
+from worker.adapters import (
+    AmexXlsxAdapter,
+    GenericCsvAdapter,
+    GenericXlsxAdapter,
+    OfxAdapter,
+    PdfTableAdapter,
+)
 from worker.adapters.base import Adapter, AdapterError
 from worker.categorize import categorize
 from worker.column_mapping import AIColumnMappingService
 from worker.dedup import transaction_dedup_hash
-from worker.fx import FXRateProvider, MissingFXRateError, stamp_fx
+from worker.fx import FXRateProvider, MissingFXRateError, pending_fx_stamp, stamp_fx
 from worker.models import CanonicalTransaction, FileIngestResult, ParsedFile, ParseStatus
 from worker.reconcile import reconcile_statement
 from worker.repository import (
@@ -44,7 +51,14 @@ class AdapterRegistry:
         self, adapters: Iterable[Adapter] | None = None, *, threshold: float = 0.4
     ) -> None:
         self.adapters = tuple(
-            adapters or (OfxAdapter(), AmexXlsxAdapter(), GenericCsvAdapter(), PdfTableAdapter())
+            adapters
+            or (
+                OfxAdapter(),
+                AmexXlsxAdapter(),
+                GenericCsvAdapter(),
+                GenericXlsxAdapter(),
+                PdfTableAdapter(),
+            )
         )
         self.threshold = threshold
 
@@ -76,20 +90,26 @@ class IngestionPipeline:
         column_mapper: AIColumnMappingService | None = None,
         auto_enqueue_categorization: bool = False,
         auto_enqueue_fx_refresh: bool = True,
+        auto_enqueue_analytics: bool = True,
     ) -> None:
         self.store = store
         self.repository = repository
         self.base_currency = base_currency.upper() if base_currency is not None else None
+        if self.base_currency is not None and self.base_currency != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
         self.fx_provider = fx_provider
         self.registry = registry or AdapterRegistry()
         self.column_mapper = column_mapper
         self.auto_enqueue_categorization = auto_enqueue_categorization
         self.auto_enqueue_fx_refresh = auto_enqueue_fx_refresh
+        self.auto_enqueue_analytics = auto_enqueue_analytics
 
     def process_file(self, *, account_id: str, file_key: str) -> FileIngestResult:
         account = self.repository.get_account_profile(account_id)
         account_kind = account.kind
         base_currency = self.base_currency or self.repository.get_base_currency()
+        if base_currency != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
         content = self.store.read(file_key)
         file = ParsedFile(
             name=PurePosixPath(file_key).name,
@@ -128,7 +148,13 @@ class IngestionPipeline:
         reconciliation = reconcile_statement(parsed.statement, parsed.rows)
         canonical: list[CanonicalTransaction] = []
         for row in parsed.rows:
-            fx = stamp_fx(row, base_currency=base_currency, provider=self.fx_provider)
+            try:
+                fx = stamp_fx(row, base_currency=base_currency, provider=self.fx_provider)
+            except MissingFXRateError:
+                # Native statement truth is independently useful and reconciles
+                # without a reporting-currency quote. A refresh job can fill the
+                # nullable CAD layer later.
+                fx = pending_fx_stamp(base_currency=base_currency)
             category = categorize(row, account_kind=account_kind)
             enrichment = {
                 **row.enrichment,
@@ -172,6 +198,7 @@ class IngestionPipeline:
             rows=tuple(canonical),
             reconciliation=reconciliation,
         )
+        source_changed = persisted.added > 0 or persisted.updated > 0
         if self.auto_enqueue_categorization and persisted.added:
             try:
                 self.repository.enqueue_categorization_job()
@@ -183,16 +210,23 @@ class IngestionPipeline:
                     extra={"file": file_key},
                 )
         needs_fx_refresh = account.native_currency != base_currency or any(
-            isinstance(row.enrichment.get("foreign_spend"), dict)
-            and row.enrichment["foreign_spend"].get("currency") != row.currency_native
+            row.original_currency is not None and row.original_currency != row.currency_native
             for row in parsed.rows
         )
-        if self.auto_enqueue_fx_refresh and persisted.added and needs_fx_refresh:
+        if self.auto_enqueue_fx_refresh and source_changed and needs_fx_refresh:
             try:
                 self.repository.enqueue_fx_refresh_job(target_base_currency=base_currency)
             except Exception:
                 LOGGER.exception(
                     "could not enqueue post-ingest FX refresh",
+                    extra={"file": file_key},
+                )
+        if self.auto_enqueue_analytics and source_changed:
+            try:
+                self.repository.enqueue_analytics_refresh_job(mode="incremental")
+            except Exception:
+                LOGGER.exception(
+                    "could not enqueue post-ingest analytics refresh",
                     extra={"file": file_key},
                 )
         reconcile_payload: dict[str, object] = dict(reconciliation.as_dict())
@@ -222,6 +256,7 @@ class JobRunner:
         categorization: JobTask | None = None,
         fx_refresh: JobTask | None = None,
         base_currency_rebuild: JobTask | None = None,
+        analytics_refresh: JobTask | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("job timeout must be positive")
@@ -232,6 +267,7 @@ class JobRunner:
             "categorize": categorization,
             "fx_refresh": fx_refresh,
             "base_currency_rebuild": base_currency_rebuild,
+            "analytics_refresh": analytics_refresh,
         }
 
     def run_once(self) -> bool:
@@ -382,6 +418,19 @@ def _ingest_payload(payload: dict[str, object]) -> tuple[str, tuple[str, ...]]:
 
 def _validate_service_payload(kind: str, payload: dict[str, object]) -> None:
     if kind == "categorize":
+        return
+    if kind == "analytics_refresh":
+        mode = payload.get("mode", "incremental")
+        if mode not in {"full", "incremental"}:
+            raise ValueError("analytics_refresh mode must be full or incremental")
+        run_id = payload.get("analytics_run_id")
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise ValueError("analytics_refresh analytics_run_id must be a non-empty string")
+        if isinstance(run_id, str):
+            try:
+                UUID(run_id)
+            except ValueError as error:
+                raise ValueError("analytics_refresh analytics_run_id must be a UUID") from error
         return
     base_currency = payload.get("target_base_currency", payload.get("base_currency"))
     if kind == "base_currency_rebuild" and not isinstance(base_currency, str):

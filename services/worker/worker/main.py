@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from worker.ai_categorization import AICategorizationService
+from worker.analytics import AnalyticsRefreshService, PostgresAnalyticsRepository
 from worker.column_mapping import AIColumnMappingService
 from worker.fx import (
     BaseCurrencyRebuildService,
@@ -141,6 +142,9 @@ def run(settings: Settings, stop: threading.Event | None = None) -> None:
         provider=fx_provider,
         max_staleness_days=settings.fx_max_staleness_days,
     )
+    analytics_refresh = AnalyticsRefreshService(
+        repository=PostgresAnalyticsRepository(settings.database_url)
+    )
     runner = JobRunner(
         jobs=repository,
         pipeline=pipeline,
@@ -148,6 +152,7 @@ def run(settings: Settings, stop: threading.Event | None = None) -> None:
         categorization=categorization,
         fx_refresh=fx_refresh,
         base_currency_rebuild=base_currency_rebuild,
+        analytics_refresh=analytics_refresh,
     )
     LOGGER.info("worker started")
     while not stop_event.is_set():

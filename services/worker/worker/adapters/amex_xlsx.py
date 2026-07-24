@@ -27,6 +27,7 @@ from worker.adapters.base import (
 )
 from worker.models import (
     AccountKind,
+    Direction,
     ParsedFile,
     ParsedTransaction,
     ParseResult,
@@ -37,6 +38,7 @@ _DATE_HEADERS = ("date", "transaction date", "booked date")
 _DESCRIPTION_HEADERS = ("description", "merchant", "details")
 _AMOUNT_HEADERS = ("amount", "transaction amount", "amount cad")
 _FOREIGN_HEADERS = ("foreign spend amount", "foreign amount")
+_FX_FEE_HEADERS = ("commission", "fx fee", "foreign exchange fee")
 _REFERENCE_HEADERS = ("reference", "reference id", "ref")
 _POSTED_DATE_HEADERS = ("posted date", "posting date", "date processed")
 _AMEX_TITLE_PERIOD = re.compile(
@@ -75,7 +77,7 @@ class AmexXlsxAdapter:
         if header is None:
             return 0.1
         normalized = {normalize_header(value) for value in rows[header]}
-        amex_markers = {"foreign spend amount", "reference"}
+        amex_markers = {"foreign spend amount"}
         preamble = " ".join(str(cell) for row in rows[:header] for cell in row).lower()
         if "american express" in preamble or normalized.intersection(amex_markers):
             return 0.99
@@ -114,6 +116,9 @@ class AmexXlsxAdapter:
         foreign_col = resolve_unique_column(
             headers, _FOREIGN_HEADERS, field="foreign spend", required=False
         )
+        fx_fee_col = resolve_unique_column(
+            headers, _FX_FEE_HEADERS, field="FX fee", required=False
+        )
         reference_col = resolve_unique_column(
             headers, _REFERENCE_HEADERS, field="reference", required=False
         )
@@ -134,6 +139,7 @@ class AmexXlsxAdapter:
                     "description": _cell(source_row, description_col),
                     "amount": _cell(source_row, amount_col),
                     "foreign": _cell(source_row, foreign_col),
+                    "fx_fee": _cell(source_row, fx_fee_col),
                     "reference": _cell(source_row, reference_col),
                 }
             )
@@ -160,8 +166,25 @@ class AmexXlsxAdapter:
                 raise AdapterError("transaction description is blank")
             amount = parse_decimal(record["amount"])
             enrichment: dict[str, Any] = {}
-            if foreign := _parse_foreign_spend(record.get("foreign")):
-                enrichment["foreign_spend"] = foreign
+            foreign = _parse_foreign_spend(record.get("foreign"))
+            original_amount = None
+            original_currency = None
+            if foreign is not None:
+                magnitude = abs(Decimal(foreign["amount"]))
+                original_amount = -magnitude if amount < 0 else magnitude
+                original_currency = foreign["currency"]
+            inline_fx_fee = (
+                abs(parse_decimal(record["fx_fee"]))
+                if record.get("fx_fee") not in (None, "")
+                else None
+            )
+            direction = infer_direction(description, amount)
+            is_fx_fee = direction is Direction.FEE and any(
+                token in normalize_header(description)
+                for token in ("foreign exchange", "fx fee", "currency conversion", "commission")
+            )
+            if is_fx_fee:
+                inline_fx_fee = None
             parsed_rows.append(
                 ParsedTransaction(
                     booked_date=parse_date(record["booked"], slash_order=slash_order),
@@ -173,10 +196,14 @@ class AmexXlsxAdapter:
                     description_raw=description,
                     amount_native=amount,
                     currency_native=metadata.currency,
+                    original_amount=original_amount,
+                    original_currency=original_currency,
+                    fx_fee_amount_native=inline_fx_fee,
+                    is_fx_fee=is_fx_fee,
                     external_ref=(
                         str(record["reference"]).strip() if record.get("reference") else None
                     ),
-                    direction=infer_direction(description, amount),
+                    direction=direction,
                     enrichment=enrichment,
                 )
             )

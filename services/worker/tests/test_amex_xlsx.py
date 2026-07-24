@@ -122,7 +122,7 @@ def test_accepts_extended_account_reference_on_same_row(
         ("US$5.25", "USD", "5.25"),
     ],
 )
-def test_parses_foreign_spend_enrichment(
+def test_parses_first_class_original_currency_evidence(
     amex_workbook_bytes, raw: str, currency: str, amount: str
 ) -> None:
     content = amex_workbook_bytes(
@@ -138,7 +138,9 @@ def test_parses_foreign_spend_enrichment(
     row = AmexXlsxAdapter().parse(ParsedFile(name="foreign.xlsx", content=content)).rows[0]
 
     assert row.currency_native == "CAD"
-    assert row.enrichment["foreign_spend"] == {"amount": amount, "currency": currency}
+    assert row.original_amount == Decimal(amount)
+    assert row.original_currency == currency
+    assert "foreign_spend" not in row.enrichment
 
 
 def test_rejects_malformed_foreign_spend(amex_workbook_bytes) -> None:

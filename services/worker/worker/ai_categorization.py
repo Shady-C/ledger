@@ -94,6 +94,8 @@ class CategorizationRepository(Protocol):
         raw_assignment: dict[str, object],
     ) -> bool: ...
 
+    def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None: ...
+
 
 _ASSIGNMENTS_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -176,6 +178,8 @@ class AICategorizationService:
             candidates = self.repository.list_unresolved_merchant_flows(limit=self.batch_size)
             unresolved = tuple(item for item in candidates if item.opaque_key not in seen)
             if not unresolved:
+                if cast(int, totals["auto_applied"]) > 0:
+                    self.repository.enqueue_analytics_refresh_job(mode="incremental")
                 return totals
             if not categories:
                 raise ValueError("categorization requires at least one active category")

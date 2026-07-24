@@ -28,6 +28,8 @@ from worker.adapters.base import (
     metadata_with_row_dates,
     normalize_header,
     parse_date,
+    parse_optional_flag,
+    statement_currency_evidence,
     statement_period_date_values,
 )
 from worker.llm.provider import LLMDisabledError, LLMProvider, LLMResponseError
@@ -57,6 +59,10 @@ class ColumnMapping(BaseModel):
     debit: str | None
     credit: str | None
     currency: str | None
+    original_amount: str | None
+    original_currency: str | None
+    fx_fee: str | None
+    is_fx_fee: str | None
     reference: str | None
     date_order: DateOrder
     decimal_separator: DecimalSeparator
@@ -70,6 +76,10 @@ class ColumnMapping(BaseModel):
         "debit",
         "credit",
         "currency",
+        "original_amount",
+        "original_currency",
+        "fx_fee",
+        "is_fx_fee",
         "reference",
         "posted_date",
     )
@@ -100,6 +110,10 @@ class ColumnMapping(BaseModel):
             raise ValueError("debit_credit semantics require split columns")
         if self.amount_semantics != "debit_credit" and not has_amount:
             raise ValueError("signed amount semantics require one amount column")
+        if (self.original_amount is None) != (self.original_currency is None):
+            raise ValueError(
+                "original_amount and original_currency columns must be mapped together"
+            )
         return self
 
 
@@ -128,6 +142,10 @@ _MAPPING_SCHEMA: dict[str, object] = {
         "debit": {"type": ["string", "null"]},
         "credit": {"type": ["string", "null"]},
         "currency": {"type": ["string", "null"]},
+        "original_amount": {"type": ["string", "null"]},
+        "original_currency": {"type": ["string", "null"]},
+        "fx_fee": {"type": ["string", "null"]},
+        "is_fx_fee": {"type": ["string", "null"]},
         "reference": {"type": ["string", "null"]},
         "date_order": {"type": "string", "enum": ["ymd", "mdy", "dmy"]},
         "decimal_separator": {"type": "string", "enum": ["dot", "comma"]},
@@ -149,6 +167,10 @@ _MAPPING_SCHEMA: dict[str, object] = {
         "debit",
         "credit",
         "currency",
+        "original_amount",
+        "original_currency",
+        "fx_fee",
+        "is_fx_fee",
         "reference",
         "date_order",
         "decimal_separator",
@@ -198,6 +220,15 @@ class AIColumnMappingService:
                     account_kind=account_kind,
                     native_currency=native_currency,
                 )
+            # Mappings cached before Phase 2 remain valid and simply lack
+            # optional three-layer/fee columns.
+            raw_mapping = {
+                "original_amount": None,
+                "original_currency": None,
+                "fx_fee": None,
+                "is_fx_fee": None,
+                **raw_mapping,
+            }
             mapping = ColumnMapping.model_validate(raw_mapping)
             mapping = _derive_deterministic_formats(
                 rows,
@@ -412,6 +443,10 @@ def _parse_mapping(
             "debit": mapping.debit,
             "credit": mapping.credit,
             "currency": mapping.currency,
+            "original_amount": mapping.original_amount,
+            "original_currency": mapping.original_currency,
+            "fx_fee": mapping.fx_fee,
+            "is_fx_fee": mapping.is_fx_fee,
             "reference": mapping.reference,
         }.items()
     }
@@ -440,6 +475,65 @@ def _parse_mapping(
         currency = str(currency_value or mapping.default_currency).strip().upper()
         if currency != native_currency:
             raise AdapterError("transaction currency differs from the selected account")
+        original_amount_value = _cell(source, columns["original_amount"])
+        original_currency_value = _cell(source, columns["original_currency"])
+        original_present = original_amount_value is not None and bool(
+            str(original_amount_value).strip()
+        )
+        original_currency_present = original_currency_value is not None and bool(
+            str(original_currency_value).strip()
+        )
+        if original_present != original_currency_present:
+            raise AdapterError(
+                "mapped original amount and currency must both be present on a row"
+            )
+        original_amount = None
+        original_currency = None
+        if original_present:
+            original_magnitude = abs(
+                _localized_decimal(
+                    original_amount_value,
+                    separator=mapping.decimal_separator,
+                )
+            )
+            original_amount = -original_magnitude if amount < 0 else original_magnitude
+            original_currency = str(original_currency_value).strip().upper()
+        resolved_direction = direction or infer_direction(description, amount)
+        normalized_description = normalize_header(description)
+        has_fx_fee_description = any(
+            token in normalized_description
+            for token in (
+                "foreign exchange fee",
+                "fx fee",
+                "currency conversion fee",
+                "fx commission",
+                "exchange commission",
+            )
+        )
+        fx_fee_value = _cell(source, columns["fx_fee"])
+        has_inline_fee_value = fx_fee_value is not None and bool(str(fx_fee_value).strip())
+        parsed_fx_fee = (
+            abs(_localized_decimal(fx_fee_value, separator=mapping.decimal_separator))
+            if has_inline_fee_value
+            else None
+        )
+        explicit_standalone = parse_optional_flag(
+            _cell(source, columns["is_fx_fee"]), field="standalone FX fee"
+        )
+        is_fx_fee = (
+            explicit_standalone
+            if explicit_standalone is not None
+            else (
+                has_fx_fee_description
+                and not original_present
+                and (parsed_fx_fee is None or parsed_fx_fee == abs(amount))
+            )
+        )
+        if is_fx_fee and original_present:
+            raise AdapterError("a standalone FX-fee row cannot contain original spend")
+        if is_fx_fee:
+            resolved_direction = Direction.FEE
+        fx_fee = parsed_fx_fee if not is_fx_fee else None
         posted_value = _cell(source, columns["posted"])
         reference_value = _cell(source, columns["reference"])
         parsed.append(
@@ -451,13 +545,21 @@ def _parse_mapping(
                 description_raw=description,
                 amount_native=amount,
                 currency_native=currency,
+                original_amount=original_amount,
+                original_currency=original_currency,
+                fx_fee_amount_native=fx_fee,
+                is_fx_fee=is_fx_fee,
                 external_ref=(str(reference_value).strip() if reference_value else None),
-                direction=direction or infer_direction(description, amount),
+                direction=resolved_direction,
             )
         )
     if not parsed:
         raise AdapterError("mapped table contains no transactions")
-    metadata = extract_statement_metadata(rows[: header_index + 1], slash_date_order=slash_order)
+    preamble = rows[: header_index + 1]
+    metadata = extract_statement_metadata(preamble, slash_date_order=slash_order)
+    labelled_statement_currency = statement_currency_evidence(preamble)
+    if labelled_statement_currency is not None and labelled_statement_currency != native_currency:
+        raise AdapterError("statement balance currency differs from the selected account")
     metadata = metadata.model_copy(update={"currency": native_currency})
     metadata = metadata_with_row_dates(metadata, [row.booked_date for row in parsed])
     return ParseResult(adapter=adapter, rows=tuple(parsed), statement=metadata)

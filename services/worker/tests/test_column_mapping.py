@@ -284,3 +284,107 @@ def test_unambiguous_slash_date_evidence_overrides_ai_order() -> None:
     assert result.rows[0].booked_date.isoformat() == "2026-02-13"
     saved = next(iter(repository.adapter_mappings.values()))
     assert saved["date_order"] == "dmy"
+
+
+def test_learned_mapping_preserves_original_currency_and_inline_fee() -> None:
+    repository = InMemoryRepository()
+    result = AIColumnMappingService(
+        provider=_MappingProvider(
+            _mapping(
+                original_amount="Foreign",
+                original_currency="Foreign Coin",
+                fx_fee="Commission",
+                default_currency="TZS",
+            )
+        ),  # type: ignore[arg-type]
+        store=repository,
+    ).parse(
+        ParsedFile(
+            name="three-layer.csv",
+            content=(
+                b"When,Who,Value,Coin,Foreign,Foreign Coin,Commission,Ref\n"
+                b"2026-01-13,Private Merchant,270000.00,TZS,100.00,USD,5000.00,R-1\n"
+            ),
+        ),
+        account_id="tzs-card",
+        account_kind=AccountKind.CREDIT_CARD,
+        native_currency="TZS",
+    )
+
+    assert result.status is ParseStatus.READY
+    row = result.rows[0]
+    assert str(row.amount_native) == "270000.00"
+    assert str(row.original_amount) == "100.00"
+    assert row.original_currency == "USD"
+    assert str(row.fx_fee_amount_native) == "5000.00"
+
+
+def test_learned_mapping_rejects_half_an_original_currency_pair() -> None:
+    repository = InMemoryRepository()
+    result = AIColumnMappingService(
+        provider=_MappingProvider(_mapping(original_amount="Foreign")),  # type: ignore[arg-type]
+        store=repository,
+    ).parse(
+        ParsedFile(
+            name="bad-three-layer.csv",
+            content=(
+                b"When,Who,Value,Coin,Foreign,Ref\n"
+                b"2026-01-13,Private Merchant,10.00,CAD,5.00,R-1\n"
+            ),
+        ),
+        account_id="card",
+        account_kind=AccountKind.CREDIT_CARD,
+        native_currency="CAD",
+    )
+
+    assert result.status is ParseStatus.NEEDS_AI
+    assert repository.adapter_mappings == {}
+
+
+def test_learned_mapping_preserves_explicit_standalone_fx_fee_evidence() -> None:
+    repository = InMemoryRepository()
+    result = AIColumnMappingService(
+        provider=_MappingProvider(
+            _mapping(is_fx_fee="Fee Row", default_currency="USD")
+        ),  # type: ignore[arg-type]
+        store=repository,
+    ).parse(
+        ParsedFile(
+            name="standalone-fee.csv",
+            content=(
+                b"When,Who,Value,Coin,Fee Row,Ref\n"
+                b"2026-01-13,Synthetic bank charge,-15.00,USD,yes,R-1\n"
+            ),
+        ),
+        account_id="usd-bank",
+        account_kind=AccountKind.CHEQUING,
+        native_currency="USD",
+    )
+
+    assert result.status is ParseStatus.READY
+    assert result.rows[0].is_fx_fee is True
+    assert result.rows[0].direction.value == "fee"
+    assert result.rows[0].fx_fee_amount_native is None
+
+
+def test_learned_mapping_rejects_conflicting_balance_currency_evidence() -> None:
+    repository = InMemoryRepository()
+    result = AIColumnMappingService(
+        provider=_MappingProvider(_mapping(default_currency="USD")),  # type: ignore[arg-type]
+        store=repository,
+    ).parse(
+        ParsedFile(
+            name="conflicting-currency.csv",
+            content=(
+                b"Currency,TZS,,,,\n"
+                b"When,Who,Value,Coin,Ref\n"
+                b"2026-01-13,Synthetic,-10.00,USD,R-1\n"
+            ),
+        ),
+        account_id="usd-bank",
+        account_kind=AccountKind.CHEQUING,
+        native_currency="USD",
+    )
+
+    assert result.status is ParseStatus.NEEDS_AI
+    assert repository.adapter_mappings == {}

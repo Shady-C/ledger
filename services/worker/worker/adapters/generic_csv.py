@@ -20,7 +20,9 @@ from worker.adapters.base import (
     normalize_header,
     parse_date,
     parse_decimal,
+    parse_optional_flag,
     resolve_unique_column,
+    statement_currency_evidence,
     statement_period_date_values,
 )
 from worker.models import AccountKind, Direction, ParsedFile, ParsedTransaction, ParseResult
@@ -31,6 +33,29 @@ AMOUNT_HEADERS = ("amount", "transaction amount", "value")
 DEBIT_HEADERS = ("debit", "debits", "withdrawal", "withdrawals", "charge")
 CREDIT_HEADERS = ("credit", "credits", "deposit", "deposits", "payment")
 CURRENCY_HEADERS = ("currency", "currency code")
+ORIGINAL_AMOUNT_HEADERS = (
+    "original amount",
+    "foreign amount",
+    "foreign spend amount",
+    "transaction amount original",
+)
+ORIGINAL_CURRENCY_HEADERS = (
+    "original currency",
+    "foreign currency",
+    "transaction currency",
+)
+FX_FEE_HEADERS = (
+    "fx fee",
+    "foreign exchange fee",
+    "currency conversion fee",
+    "fx commission",
+    "foreign exchange commission",
+)
+STANDALONE_FX_FEE_HEADERS = (
+    "is fx fee",
+    "standalone fx fee",
+    "fx fee transaction",
+)
 REFERENCE_HEADERS = ("reference", "reference id", "transaction id")
 POSTED_DATE_HEADERS = ("posted date", "posting date")
 
@@ -89,6 +114,21 @@ class GenericCsvAdapter:
         currency_col = resolve_unique_column(
             headers, CURRENCY_HEADERS, field="currency", required=False
         )
+        original_amount_col = resolve_unique_column(
+            headers, ORIGINAL_AMOUNT_HEADERS, field="original amount", required=False
+        )
+        original_currency_col = resolve_unique_column(
+            headers, ORIGINAL_CURRENCY_HEADERS, field="original currency", required=False
+        )
+        fx_fee_col = resolve_unique_column(
+            headers, FX_FEE_HEADERS, field="FX fee", required=False
+        )
+        standalone_fx_fee_col = resolve_unique_column(
+            headers,
+            STANDALONE_FX_FEE_HEADERS,
+            field="standalone FX fee",
+            required=False,
+        )
         reference_col = resolve_unique_column(
             headers, REFERENCE_HEADERS, field="reference", required=False
         )
@@ -110,6 +150,10 @@ class GenericCsvAdapter:
                     "debit": _cell(row, debit_col),
                     "credit": _cell(row, credit_col),
                     "currency": _cell(row, currency_col),
+                    "original_amount": _cell(row, original_amount_col),
+                    "original_currency": _cell(row, original_currency_col),
+                    "fx_fee": _cell(row, fx_fee_col),
+                    "is_fx_fee": _cell(row, standalone_fx_fee_col),
                     "reference": _cell(row, reference_col),
                 }
             )
@@ -125,6 +169,7 @@ class GenericCsvAdapter:
             + list(statement_period_date_values(preamble))
         )
         metadata = extract_statement_metadata(preamble, slash_date_order=slash_format)
+        labelled_statement_currency = statement_currency_evidence(preamble)
         frame = pl.DataFrame(records, infer_schema_length=None) if records else pl.DataFrame()
         parsed: list[ParsedTransaction] = []
         for record in frame.iter_rows(named=True):
@@ -132,6 +177,52 @@ class GenericCsvAdapter:
             if not description:
                 raise AdapterError("transaction description is blank")
             amount, direction = _row_amount(record, account_kind=account_kind)
+            original_amount_value = record.get("original_amount")
+            original_currency_value = record.get("original_currency")
+            original_present = original_amount_value not in (None, "")
+            original_currency_present = original_currency_value not in (None, "")
+            if original_present != original_currency_present:
+                raise AdapterError(
+                    "original amount and original currency must both be present on a row"
+                )
+            original_amount = None
+            original_currency = None
+            if original_present:
+                magnitude = abs(parse_decimal(original_amount_value))
+                original_amount = -magnitude if amount < 0 else magnitude
+                original_currency = str(original_currency_value).strip().upper()
+            resolved_direction = direction or infer_direction(description, amount)
+            has_fx_fee_description = any(
+                token in normalize_header(description)
+                for token in (
+                    "foreign exchange fee",
+                    "fx fee",
+                    "currency conversion fee",
+                    "fx commission",
+                    "exchange commission",
+                )
+            )
+            has_inline_fee_value = record.get("fx_fee") not in (None, "")
+            parsed_fx_fee = (
+                abs(parse_decimal(record["fx_fee"])) if has_inline_fee_value else None
+            )
+            explicit_standalone = parse_optional_flag(
+                record.get("is_fx_fee"), field="standalone FX fee"
+            )
+            is_fx_fee = (
+                explicit_standalone
+                if explicit_standalone is not None
+                else (
+                    has_fx_fee_description
+                    and not original_present
+                    and (parsed_fx_fee is None or parsed_fx_fee == abs(amount))
+                )
+            )
+            if is_fx_fee and original_present:
+                raise AdapterError("a standalone FX-fee row cannot contain original spend")
+            if is_fx_fee:
+                resolved_direction = Direction.FEE
+            inline_fx_fee = parsed_fx_fee if not is_fx_fee else None
             parsed.append(
                 ParsedTransaction(
                     booked_date=parse_date(record["booked"], slash_order=slash_format),
@@ -143,10 +234,14 @@ class GenericCsvAdapter:
                     description_raw=description,
                     amount_native=amount,
                     currency_native=str(record.get("currency") or metadata.currency).upper(),
+                    original_amount=original_amount,
+                    original_currency=original_currency,
+                    fx_fee_amount_native=inline_fx_fee,
+                    is_fx_fee=is_fx_fee,
                     external_ref=(
                         str(record["reference"]).strip() if record.get("reference") else None
                     ),
-                    direction=direction or infer_direction(description, amount),
+                    direction=resolved_direction,
                 )
             )
         if not parsed:
@@ -154,7 +249,13 @@ class GenericCsvAdapter:
         row_currencies = {row.currency_native for row in parsed}
         if len(row_currencies) != 1:
             raise AdapterError("CSV mixes multiple native currencies")
-        metadata = metadata.model_copy(update={"currency": next(iter(row_currencies))})
+        row_currency = next(iter(row_currencies))
+        if (
+            labelled_statement_currency is not None
+            and labelled_statement_currency != row_currency
+        ):
+            raise AdapterError("statement balance currency differs from transaction currency")
+        metadata = metadata.model_copy(update={"currency": row_currency})
         metadata = metadata_with_row_dates(metadata, [row.booked_date for row in parsed])
         return ParseResult(adapter=self.name, rows=tuple(parsed), statement=metadata)
 

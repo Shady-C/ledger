@@ -28,10 +28,10 @@ class RateQuote:
 
 @dataclass(frozen=True, slots=True)
 class FxStamp:
-    amount_base: Decimal
+    amount_base: Decimal | None
     currency_base: str
-    rate: Decimal
-    rate_date: date
+    rate: Decimal | None
+    rate_date: date | None
     source: str
 
 
@@ -71,6 +71,8 @@ class FXRebuildRepository(Protocol):
 
     def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int: ...
 
+    def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None: ...
+
 
 def stamp_fx(
     transaction: ParsedTransaction,
@@ -93,6 +95,15 @@ def stamp_fx(
     if provider is None:
         raise MissingFXRateError(f"no FX provider configured for {native}/{base}")
     quote = provider.get_rate(base=native, quote=base, as_of=transaction.booked_date)
+    max_staleness_days = getattr(provider, "max_staleness_days", 7)
+    if not isinstance(max_staleness_days, int) or not 0 <= max_staleness_days <= 7:
+        max_staleness_days = 7
+    _validate_quote(
+        rate=quote.rate,
+        rate_date=quote.as_of,
+        requested=transaction.booked_date,
+        max_days=max_staleness_days,
+    )
     rate = normalize_rate(quote.rate)
     return FxStamp(
         amount_base=(transaction.amount_native * rate).quantize(
@@ -102,6 +113,18 @@ def stamp_fx(
         rate=rate,
         rate_date=quote.as_of,
         source=quote.source,
+    )
+
+
+def pending_fx_stamp(*, base_currency: str = "CAD") -> FxStamp:
+    """Represent an unavailable derived valuation without changing native truth."""
+
+    return FxStamp(
+        amount_base=None,
+        currency_base=_currency(base_currency),
+        rate=None,
+        rate_date=None,
+        source="pending",
     )
 
 
@@ -215,6 +238,8 @@ class CachedFXRateProvider:
     def __init__(self, *, cache: FXRateCache, upstream: FXRateProvider) -> None:
         self.cache = cache
         self.upstream = upstream
+        cache_staleness = getattr(cache, "max_staleness_days", 7)
+        self.max_staleness_days = cache_staleness if isinstance(cache_staleness, int) else 7
 
     def get_rate(self, *, base: str, quote: str, as_of: date) -> RateQuote:
         base_code = _currency(base)
@@ -223,8 +248,20 @@ class CachedFXRateProvider:
             return RateQuote(Decimal("1"), as_of, "identity")
         cached = self.cache.find_rate(base=base_code, quote=quote_code, as_of=as_of)
         if cached is not None:
+            _validate_quote(
+                rate=cached.rate,
+                rate_date=cached.as_of,
+                requested=as_of,
+                max_days=self.max_staleness_days,
+            )
             return RateQuote(normalize_rate(cached.rate), cached.as_of, cached.source)
         resolved = self.upstream.get_rate(base=base_code, quote=quote_code, as_of=as_of)
+        _validate_quote(
+            rate=resolved.rate,
+            rate_date=resolved.as_of,
+            requested=as_of,
+            max_days=self.max_staleness_days,
+        )
         normalized = RateQuote(normalize_rate(resolved.rate), resolved.as_of, resolved.source)
         self.cache.store_rate(base=base_code, quote=quote_code, rate=normalized)
         return normalized
@@ -327,19 +364,41 @@ class FXRefreshService:
         if not isinstance(target_value, str):
             raise ValueError("fx_refresh base_currency must be a string")
         target = _currency(target_value)
+        if target != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
         requirements = self.repository.list_fx_requirements(target_currency=target)
         quote_currencies: set[str] = set()
+        unavailable: list[FXRequirement] = []
+        rates_stored = 0
         for requirement in requirements:
-            self.provider.get_rate(
-                base=requirement.base,
-                quote=requirement.quote,
-                as_of=requirement.as_of,
-            )
+            try:
+                self.provider.get_rate(
+                    base=requirement.base,
+                    quote=requirement.quote,
+                    as_of=requirement.as_of,
+                )
+            except MissingFXRateError:
+                unavailable.append(requirement)
+            else:
+                rates_stored += 1
             quote_currencies.add(requirement.base)
+        provider_staleness = getattr(self.provider, "max_staleness_days", 7)
+        if not isinstance(provider_staleness, int):
+            provider_staleness = 7
+        transactions_updated = self.repository.rebuild_base_currency(
+            target_currency=target,
+            max_staleness_days=provider_staleness,
+        )
+        self.repository.enqueue_analytics_refresh_job(mode="incremental")
+        if unavailable:
+            raise MissingFXRateError(
+                f"{len(unavailable)} required FX rate(s) remain unavailable"
+            )
         return {
             "base_currency": target,
             "quote_currencies": sorted(quote_currencies),
-            "rates_stored": len(requirements),
+            "rates_stored": rates_stored,
+            "transactions_updated": transactions_updated,
         }
 
 
@@ -362,12 +421,14 @@ class BaseCurrencyRebuildService:
         if not isinstance(target_value, str):
             raise ValueError("base_currency_rebuild requires base_currency")
         target = _currency(target_value)
+        if target != "CAD":
+            raise ValueError("Phase 2 reporting currency is fixed to CAD")
         previous = self.repository.get_base_currency()
-        self.refresh.run({"target_base_currency": target})
-        rebuilt = self.repository.rebuild_base_currency(
-            target_currency=target,
-            max_staleness_days=self.max_staleness_days,
-        )
+        refreshed = self.refresh.run({"target_base_currency": target})
+        rebuilt_value = refreshed.get("transactions_updated")
+        if not isinstance(rebuilt_value, int):
+            raise TypeError("FX refresh returned an invalid transaction count")
+        rebuilt = rebuilt_value
         return {
             "previous_base_currency": previous,
             "target_base_currency": target,

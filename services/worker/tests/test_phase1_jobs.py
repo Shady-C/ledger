@@ -43,18 +43,32 @@ class _Task:
         ),
         (
             "base_currency_rebuild",
-            {"target_base_currency": "USD"},
+            {"target_base_currency": "CAD"},
             "base_currency_rebuild",
             {
                 "previous_base_currency": "CAD",
-                "target_base_currency": "USD",
+                "target_base_currency": "CAD",
                 "transactions_updated": 2,
                 "settings_updated": True,
             },
         ),
+        (
+            "analytics_refresh",
+            {"mode": "incremental"},
+            "analytics_refresh",
+            {
+                "generation": 1,
+                "mode": "incremental",
+                "source_watermark": None,
+                "aggregate_count": 0,
+                "recurring_series_count": 0,
+                "finding_count": 0,
+                "duration_ms": 1,
+            },
+        ),
     ],
 )
-def test_runner_dispatches_every_phase1_job_kind(
+def test_runner_dispatches_every_service_job_kind(
     kind: str,
     payload: dict[str, object],
     handler_name: str,
@@ -66,6 +80,7 @@ def test_runner_dispatches_every_phase1_job_kind(
         "categorization": None,
         "fx_refresh": None,
         "base_currency_rebuild": None,
+        "analytics_refresh": None,
     }
     handlers[handler_name] = task
     runner = JobRunner(
@@ -143,17 +158,25 @@ def test_ingest_missing_rate_requeues_without_partial_rollback() -> None:
     assert repository.jobs[0].retry_count == 1
 
 
-@pytest.mark.parametrize("kind", ["categorize", "fx_refresh"])
+@pytest.mark.parametrize("kind", ["categorize", "fx_refresh", "analytics_refresh"])
 def test_followup_enqueue_during_claim_forces_exactly_one_rerun(kind: str) -> None:
-    payload = {"target_base_currency": "CAD"} if kind == "fx_refresh" else {}
+    payload = (
+        {"target_base_currency": "CAD"}
+        if kind == "fx_refresh"
+        else {"mode": "incremental", "analytics_run_id": "run-one"}
+        if kind == "analytics_refresh"
+        else {}
+    )
     repository = InMemoryRepository([Job(id="coalesced", kind=kind, payload=payload)])
 
     first = repository.claim_next_job(timeout_seconds=60)
     assert first is not None
     if kind == "categorize":
         repository.enqueue_categorization_job()
-    else:
+    elif kind == "fx_refresh":
         repository.enqueue_fx_refresh_job(target_base_currency="CAD")
+    else:
+        repository.enqueue_analytics_refresh_job(mode="incremental")
     # A heartbeat after the racing enqueue must not erase the rerun marker.
     repository.heartbeat_job(first)
     repository.complete_job(first, {"first": True}, needs_ai=False)
@@ -163,6 +186,8 @@ def test_followup_enqueue_during_claim_forces_exactly_one_rerun(kind: str) -> No
     second = repository.claim_next_job(timeout_seconds=60)
     assert second is not None
     assert "rerun_requested" not in second.payload
+    if kind == "analytics_refresh":
+        assert "analytics_run_id" not in second.payload
     repository.complete_job(second, {"second": True}, needs_ai=False)
 
     assert repository.jobs == []
@@ -180,6 +205,53 @@ def test_queued_followup_coalesces_without_an_unnecessary_second_run() -> None:
 
     assert repository.jobs == []
     assert repository.completed["queued"]["status"] == "done"
+
+
+def test_full_analytics_request_upgrades_a_queued_incremental_refresh() -> None:
+    repository = InMemoryRepository(
+        [Job(id="analytics", kind="analytics_refresh", payload={"mode": "incremental"})]
+    )
+
+    repository.enqueue_analytics_refresh_job(mode="full")
+    claimed = repository.claim_next_job(timeout_seconds=60)
+
+    assert claimed is not None
+    assert claimed.payload == {"mode": "full"}
+    repository.complete_job(claimed, {}, needs_ai=False)
+    assert repository.jobs == []
+
+
+def test_full_analytics_request_during_claim_forces_a_full_rerun() -> None:
+    repository = InMemoryRepository(
+        [
+            Job(
+                id="analytics",
+                kind="analytics_refresh",
+                payload={"mode": "incremental", "analytics_run_id": "first-run"},
+            )
+        ]
+    )
+    claimed = repository.claim_next_job(timeout_seconds=60)
+    assert claimed is not None
+
+    repository.enqueue_analytics_refresh_job(mode="full")
+    repository.complete_job(claimed, {}, needs_ai=False)
+    rerun = repository.claim_next_job(timeout_seconds=60)
+
+    assert rerun is not None
+    assert rerun.payload == {"mode": "full"}
+
+
+def test_incremental_analytics_request_does_not_downgrade_a_queued_full_refresh() -> None:
+    repository = InMemoryRepository(
+        [Job(id="analytics", kind="analytics_refresh", payload={"mode": "full"})]
+    )
+
+    repository.enqueue_analytics_refresh_job(mode="incremental")
+    claimed = repository.claim_next_job(timeout_seconds=60)
+
+    assert claimed is not None
+    assert claimed.payload == {"mode": "full"}
 
 
 def test_repeated_stale_claims_consume_the_bounded_retry_budget() -> None:

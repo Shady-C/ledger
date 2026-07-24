@@ -263,6 +263,7 @@ def test_job_runner_claims_processes_and_completes_an_ingest_job(
         store=MemoryObjectStore(objects),
         repository=repository,
         auto_enqueue_fx_refresh=False,
+        auto_enqueue_analytics=False,
     )
     runner = JobRunner(jobs=repository, pipeline=pipeline)
 
@@ -306,7 +307,8 @@ def test_non_base_import_enqueues_deduplicated_fx_refresh_after_persistence() ->
 
     assert (first.added, second.added) == (1, 0)
     assert [(job.kind, job.payload) for job in repository.jobs] == [
-        ("fx_refresh", {"target_base_currency": "CAD"})
+        ("fx_refresh", {"target_base_currency": "CAD"}),
+        ("analytics_refresh", {"mode": "incremental"}),
     ]
 
 
@@ -512,4 +514,72 @@ def test_pipeline_uses_repository_account_kind_for_generic_signs() -> None:
     assert [row.amount_native for row in repository.transactions.values()] == [
         Decimal("-25.00"),
         Decimal("15.00"),
+    ]
+
+
+def test_missing_cad_rate_persists_native_truth_and_queues_refresh() -> None:
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Original Amount,Original Currency,FX Fee\n"
+        b"2026-01-03,Synthetic foreign purchase,25000.00,,TZS,10.00,USD,500.00\n"
+    )
+    repository = InMemoryRepository(
+        account_kinds={"tzs-account": AccountKind.CHEQUING},
+        account_currencies={"tzs-account": "TZS"},
+    )
+    pipeline = IngestionPipeline(
+        store=MemoryObjectStore({"tzs.csv": content}),
+        repository=repository,
+        fx_provider=None,
+    )
+
+    result = pipeline.process_file(account_id="tzs-account", file_key="tzs.csv")
+
+    assert result.status == "done"
+    transaction = next(iter(repository.transactions.values()))
+    assert transaction.amount_native == Decimal("-25000.00")
+    assert transaction.currency_native == "TZS"
+    assert transaction.original_amount == Decimal("-10.00")
+    assert transaction.original_currency == "USD"
+    assert transaction.fx_fee_amount_native == Decimal("500.00")
+    assert transaction.amount_base is None
+    assert transaction.currency_base == "CAD"
+    assert transaction.fx_rate is None
+    assert transaction.fx_rate_date is None
+    assert transaction.enrichment["fx_source"] == "pending"
+    assert any(job.kind == "fx_refresh" for job in repository.jobs)
+
+
+def test_zero_row_reimport_with_new_currency_evidence_refreshes_fx_and_analytics() -> None:
+    original = (
+        b"Date,Description,Debit,Credit,Currency,Reference\n"
+        b"2026-01-03,Synthetic foreign purchase,25000.00,,TZS,TX-1\n"
+    )
+    enriched = (
+        b"Date,Description,Debit,Credit,Currency,Original Amount,"
+        b"Original Currency,FX Fee,Reference\n"
+        b"2026-01-03,Synthetic foreign purchase,25000.00,,TZS,10.00,USD,500.00,TX-1\n"
+    )
+    repository = InMemoryRepository(
+        account_kinds={"tzs-account": AccountKind.CHEQUING},
+        account_currencies={"tzs-account": "TZS"},
+    )
+
+    first = IngestionPipeline(
+        store=MemoryObjectStore({"statement.csv": original}),
+        repository=repository,
+    ).process_file(account_id="tzs-account", file_key="statement.csv")
+    repository.jobs.clear()
+    second = IngestionPipeline(
+        store=MemoryObjectStore({"statement.csv": enriched}),
+        repository=repository,
+    ).process_file(account_id="tzs-account", file_key="statement.csv")
+
+    transaction = next(iter(repository.transactions.values()))
+    assert (first.added, second.added, second.skipped) == (1, 0, 1)
+    assert transaction.original_amount == Decimal("-10.00")
+    assert transaction.original_currency == "USD"
+    assert transaction.fx_fee_amount_native == Decimal("500.00")
+    assert [(job.kind, job.payload) for job in repository.jobs] == [
+        ("fx_refresh", {"target_base_currency": "CAD"}),
+        ("analytics_refresh", {"mode": "incremental"}),
     ]
