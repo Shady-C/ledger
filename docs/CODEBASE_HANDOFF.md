@@ -145,8 +145,10 @@ Default host bindings are loopback-only:
 | `src/service-worker.ts` | PWA shell caching and network-first caching for account/analytics aggregates |
 
 The service worker deliberately does not cache transaction pages, job results,
-uploads, or raw statement data. It caches the shell plus `GET /api/accounts` and
-`GET /api/analytics/*` responses for offline aggregate reads.
+uploads, or raw statement data. It keeps a network-first offline fallback for
+the shell plus `GET /api/accounts` and `GET /api/analytics/*`. Online API reads
+use `Cache-Control: no-store`, and dashboard fetches bypass the HTTP cache, so a
+completed import cannot mix stale account values with fresh analytics.
 
 ### HTTP API
 
@@ -170,11 +172,15 @@ Important balance semantics:
 
 - Account summaries use the latest reported closing balance plus later
   transactions. If no reported closing balance exists, they use the earliest
-  opening balance plus all transactions.
-- Transaction running balances are calculated over the full account ledger
-  before result filters and pagination are applied.
+  opening balance plus all transactions. If neither source balance exists, the
+  same number is explicitly marked and displayed as transaction net activity,
+  not a verified current balance.
+- Transaction positions are calculated over the full account ledger before
+  result filters and pagination are applied. They use processed date when
+  available and show one stable end-of-day position for every same-date row.
 - Date-filtered balance charts also calculate the cumulative balance first and
-  filter visible dates afterward.
+  filter visible dates afterward; their response identifies whether the series
+  is a balance or net-activity fallback.
 - Credit-card cash flow treats positive non-payment amounts as outflow and
   negative credits/refunds as inflow. Payments are excluded from spending flow.
 - Asset accounts (`chequing`, `savings`, `wallet`) treat positive values as
@@ -239,6 +245,13 @@ threshold. Parsing is fail-closed:
   `Description`, `Merchant`, or `Details` coexist, their normalized values must
   agree on every transaction row; the adapter then uses its explicit alias
   preference order. Conflicting values fail closed.
+- Real Amex workbooks are read across `Transaction Details` and `Transaction
+  Summary`: the title supplies the explicit `DD Mon YYYY` period, `Date
+  Processed` supplies posting order, the split Account Number block supplies a
+  masked identity, and labeled summary totals supply opening/closing balances.
+- Masked account references compare every exposed digit. A four-digit mask may
+  match the last four digits of a longer mask, but two longer, different
+  suffixes fail closed.
 - Slash-date order is inferred once from all statement-period, booked, and
   posted values. Unresolved or conflicting MDY/DMY evidence is rejected.
 - Source monetary values must be exactly representable at two decimal places.
@@ -282,7 +295,10 @@ Reconciliation is exact:
 It produces `ok`, `mismatch`, or `pending` when a required balance is missing.
 Account-wide period analysis may change a statement to `gap`. Coverage is
 re-evaluated whenever a statement is persisted, so an out-of-order upload can
-close an earlier gap.
+close an earlier gap. Re-uploading the same source refreshes corrected statement
+metadata and reconciliation status while transaction hashes still add zero
+duplicate rows. A later incomplete parse cannot replace a previously verified
+opening/closing pair with missing values.
 
 ### Job leases and partial results
 
@@ -553,7 +569,9 @@ Check, in order:
 3. Transaction native amounts before base-currency values.
 4. Reconciliation status and reported difference.
 5. Coverage gaps or overlapping/out-of-order statements.
-6. Query semantics in `db.ts`, especially whether the view uses latest closing
+6. Whether the export's `Transaction Summary` sheet and `Date Processed` column
+   were parsed; a missing source balance must be labeled as net activity.
+7. Query semantics in `db.ts`, especially whether the view uses latest closing
    or earliest opening and whether filters are applied after running totals.
 
 ### A multipart POST returns 403
@@ -594,8 +612,9 @@ phase or the scope is explicitly overridden.
   beyond a local machine.
 - Run `make check` and `make test`.
 - Run the container smoke test on a fresh disposable stack.
-- Import the owner's original three Amex exports and confirm the expected
-  `2855.59` closing balance before marking Phase 0 complete.
+- [x] Import the owner's original three Amex exports and confirm the expected
+  `2855.59` closing balance. Local acceptance on 2026-07-24 reconciled all three
+  statements, retained 193 canonical rows, and added zero rows on repeat import.
 - Confirm backup and key-recovery procedures before storing irreplaceable data.
 - Keep `docs/` canonical and publish it to Confluence only when a Confluence
   space is configured.

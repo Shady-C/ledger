@@ -2,8 +2,10 @@
 
 **Status:** Implemented and in review as of 2026-07-24. Automated validation
 uses three sanitized, structurally representative Amex workbooks because no
-private statement files are stored in this repository. A final import of the
-owner's original exports remains a user acceptance check.
+private statement files are stored in this repository. The owner's original
+three exports also passed local acceptance on 2026-07-24: 193 canonical rows,
+three successful reconciliations, a `2855.59` closing balance, and zero rows
+added by an identical repeat import.
 
 > Companion to `ARCHITECTURE.md`. This is the first executable slice: a
 > **self-hosted, end-to-end vertical** that ingests Amex statements,
@@ -205,10 +207,11 @@ class Adapter(Protocol):
     def detect(self, file: ParsedFile) -> float: ...      # 0..1 confidence
     def parse(self, file: ParsedFile) -> ParseResult: ...  # rows + statement meta
 ```
-- `amex_xlsx.py` — knows the export: title row carries the period; header lands
-  on the row containing `Date`+`Amount`; columns Date/Description/Amount/
-  Foreign Spend Amount/Reference; exports may repeat equivalent description
-  text in a Merchant column; sign convention = charges positive.
+- `amex_xlsx.py` — knows the two-sheet export: `Transaction Details` carries the
+  title period, booked/processed dates, description, amount, foreign spend,
+  merchant, and reference; `Transaction Summary` carries opening and closing
+  balances. Equivalent Description/Merchant text is accepted; conflicting
+  aliases fail closed. Sign convention = charges positive.
 - `generic_csv.py` — header auto-locate + best-effort field guess (deterministic;
   the AI mapper that handles the truly unknown is Phase 1).
 - `pdf_table.py` — `pdfplumber` first, `camelot` for bordered tables. Extracts
@@ -276,7 +279,9 @@ look:
 - **Accounts strip** with current balances.
 - **Running balance chart** — uPlot (fast on mobile).
 - **Cash-flow chart** — ECharts (in vs out vs net by statement).
-- **Transactions table** — search, category filter, running-balance column.
+- **Transactions table** — search, category filter, amount/date sorting,
+  processed-date end-of-day position, direct page selection, and configurable
+  10/25/50/100-row pages.
 - **PWA manifest + service worker** caching last aggregates for offline read.
 
 Deliberately *not* in Phase 0: subscriptions view, anomalies, the ask-bar — those
@@ -330,7 +335,8 @@ base-currency switch. All plug into seams built in Phase 0.
 ## 10. Phase 0 handoff
 
 Automated acceptance is wired into CI and can be reproduced with `make smoke`
-against a healthy fresh stack. Before closing Phase 0, import the owner's three
-original Amex exports and confirm the same `2855.59` closing balance. Then review
-the Phase 1 statement inventory and create its backlog; no provider key is
-needed while Phase 0 remains active.
+against a healthy fresh stack. Local acceptance with the owner's three original
+Amex exports confirmed 193 canonical rows, three reconciled statements, the
+same `2855.59` closing balance, and an idempotent repeat import. Before closing
+Phase 0, review the Phase 1 statement inventory and create its backlog; no
+provider key is needed while Phase 0 remains active.

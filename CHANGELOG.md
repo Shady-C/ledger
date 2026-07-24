@@ -27,3 +27,16 @@ All notable changes to Ledger are documented here.
   statements, with content-addressed object identity.
 - [ADR-0002] Accept equivalent Amex Description/Merchant columns while
   rejecting conflicting aliases, and include tracebacks in worker failure logs.
+
+### Fixed
+
+- Parse the real two-sheet Amex transaction export, including explicit billing
+  periods, processed dates, masked account identity, and opening/closing totals
+  from `Transaction Summary`; repeat imports refresh corrected statement
+  and processed-date metadata without duplicating ledger rows or erasing a
+  previously verified balance when a later parse is incomplete.
+- Prevent stale account and analytics values immediately after imports, label
+  transaction-only movement as net activity when balances are unavailable, and
+  calculate running positions by processed-date end of day.
+- Sort “Largest/Smallest amount” by magnitude and add direct page plus
+  10/25/50/100 rows-per-page controls to the transaction table.
