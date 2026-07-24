@@ -125,6 +125,59 @@ def test_multiple_amex_alias_columns_fail_closed(amex_workbook_bytes) -> None:
         AmexXlsxAdapter().parse(ParsedFile(name="ambiguous-alias.xlsx", content=output.getvalue()))
 
 
+def test_identical_description_and_merchant_columns_are_accepted(amex_workbook_bytes) -> None:
+    content = amex_workbook_bytes(
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 4, 30),
+        opening=Decimal("0"),
+        closing=Decimal("1"),
+        transactions=[(date(2026, 4, 2), "Synthetic Market", Decimal("1"), None, "A-2")],
+    )
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+    header_row = next(
+        row[0].row for row in sheet.iter_rows() if any(cell.value == "Date" for cell in row)
+    )
+    merchant_column = sheet.max_column + 1
+    sheet.cell(row=header_row, column=merchant_column, value="Merchant")
+    sheet.cell(row=header_row + 1, column=merchant_column, value="  synthetic   MARKET ")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    result = AmexXlsxAdapter().parse(
+        ParsedFile(name="equivalent-description.xlsx", content=output.getvalue())
+    )
+
+    assert [row.description_raw for row in result.rows] == ["Synthetic Market"]
+
+
+def test_conflicting_description_and_merchant_columns_fail_closed(amex_workbook_bytes) -> None:
+    content = amex_workbook_bytes(
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 4, 30),
+        opening=Decimal("0"),
+        closing=Decimal("1"),
+        transactions=[(date(2026, 4, 2), "Synthetic Market", Decimal("1"), None, "A-3")],
+    )
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+    header_row = next(
+        row[0].row for row in sheet.iter_rows() if any(cell.value == "Date" for cell in row)
+    )
+    merchant_column = sheet.max_column + 1
+    sheet.cell(row=header_row, column=merchant_column, value="Merchant")
+    sheet.cell(row=header_row + 1, column=merchant_column, value="Different Merchant")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+
+    with pytest.raises(AdapterError, match="conflicting description columns"):
+        AmexXlsxAdapter().parse(
+            ParsedFile(name="conflicting-description.xlsx", content=output.getvalue())
+        )
+
+
 def test_amex_slash_order_is_inferred_across_period_and_all_rows(amex_workbook_bytes) -> None:
     content = amex_workbook_bytes(
         period_start=date(2026, 2, 1),

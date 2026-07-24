@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -188,6 +189,7 @@ def test_gap_is_surfaced_and_cleared_when_missing_statement_arrives_out_of_order
 
 def test_multi_file_job_preserves_successes_and_continues_after_safe_failure(
     amex_workbook_bytes,
+    caplog,
 ) -> None:
     objects = _golden_files(amex_workbook_bytes)
     keys = list(objects)
@@ -205,7 +207,8 @@ def test_multi_file_job_preserves_successes_and_continues_after_safe_failure(
     )
     pipeline = IngestionPipeline(store=MemoryObjectStore(objects), repository=repository)
 
-    JobRunner(jobs=repository, pipeline=pipeline).run_once()
+    with caplog.at_level(logging.WARNING, logger="worker.pipeline"):
+        JobRunner(jobs=repository, pipeline=pipeline).run_once()
 
     result = repository.completed["partial-job"]
     assert result["status"] == "failed"
@@ -215,6 +218,10 @@ def test_multi_file_job_preserves_successes_and_continues_after_safe_failure(
     assert "missing-private-name" not in repository.failed["partial-job"]
     assert len(repository.transactions) == 4
     assert repository.heartbeat_count >= 1
+    failure_log = next(
+        record for record in caplog.records if record.message == "file ingestion failed"
+    )
+    assert failure_log.exc_info is not None
 
 
 def test_pipeline_uses_repository_account_kind_for_generic_signs() -> None:

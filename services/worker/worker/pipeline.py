@@ -195,6 +195,7 @@ class JobRunner:
                     LOGGER.warning(
                         "file ingestion failed",
                         extra={"job_id": job.id, "file": file_key},
+                        exc_info=True,
                     )
                     outcome = FileIngestResult(
                         file_key=file_key,

@@ -235,7 +235,10 @@ Detection returns a confidence score; the highest score must meet the registry
 threshold. Parsing is fail-closed:
 
 - Multiple accepted aliases for the same field are rejected rather than chosen
-  nondeterministically.
+  nondeterministically, except equivalent Amex description aliases. When
+  `Description`, `Merchant`, or `Details` coexist, their normalized values must
+  agree on every transaction row; the adapter then uses its explicit alias
+  preference order. Conflicting values fail closed.
 - Slash-date order is inferred once from all statement-period, booked, and
   posted values. Unresolved or conflicting MDY/DMY evidence is rejected.
 - Source monetary values must be exactly representable at two decimal places.

@@ -82,7 +82,12 @@ class AmexXlsxAdapter:
 
         headers = [normalize_header(cell) for cell in rows[header_index]]
         date_col = resolve_unique_column(headers, _DATE_HEADERS, field="booked date")
-        description_col = resolve_unique_column(headers, _DESCRIPTION_HEADERS, field="description")
+        assert date_col is not None
+        description_col = _resolve_description_column(
+            headers,
+            rows=rows[header_index + 1 :],
+            date_col=date_col,
+        )
         amount_col = resolve_unique_column(headers, _AMOUNT_HEADERS, field="amount")
         foreign_col = resolve_unique_column(
             headers, _FOREIGN_HEADERS, field="foreign spend", required=False
@@ -172,6 +177,44 @@ def _cell(row: list[object], index: int | None) -> object | None:
     if index is None or index >= len(row):
         return None
     return row[index]
+
+
+def _resolve_description_column(
+    headers: list[str],
+    *,
+    rows: list[list[object]],
+    date_col: int,
+) -> int:
+    """Accept duplicate Amex description aliases only when their values agree."""
+
+    accepted = frozenset(_DESCRIPTION_HEADERS)
+    matches = [(index, header) for index, header in enumerate(headers) if header in accepted]
+    if not matches:
+        raise AdapterError(
+            f"required description column missing (expected one of {list(_DESCRIPTION_HEADERS)})"
+        )
+    if len(matches) == 1:
+        return matches[0][0]
+
+    for row in rows:
+        if _cell(row, date_col) in (None, ""):
+            continue
+        values = {
+            " ".join(str(_cell(row, index) or "").split()).casefold()
+            for index, _header in matches
+        }
+        if len(values) > 1:
+            names = ", ".join(header for _index, header in matches)
+            raise AdapterError(f"conflicting description columns: {names}")
+
+    # Alias order is the explicit preference order; Amex's Description wins
+    # when the export also includes an equivalent Merchant column.
+    return next(
+        index
+        for alias in _DESCRIPTION_HEADERS
+        for index, header in matches
+        if header == alias
+    )
 
 
 _FOREIGN_PATTERNS = (

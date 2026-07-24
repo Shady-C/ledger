@@ -25,3 +25,5 @@ All notable changes to Ledger are documented here.
   financial-data ignore rules.
 - [ADR-0001] Versioned application-layer AES-256-GCM encryption for raw
   statements, with content-addressed object identity.
+- [ADR-0002] Accept equivalent Amex Description/Merchant columns while
+  rejecting conflicting aliases, and include tracebacks in worker failure logs.

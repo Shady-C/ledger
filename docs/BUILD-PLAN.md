@@ -207,7 +207,8 @@ class Adapter(Protocol):
 ```
 - `amex_xlsx.py` — knows the export: title row carries the period; header lands
   on the row containing `Date`+`Amount`; columns Date/Description/Amount/
-  Foreign Spend Amount/Reference; sign convention = charges positive.
+  Foreign Spend Amount/Reference; exports may repeat equivalent description
+  text in a Merchant column; sign convention = charges positive.
 - `generic_csv.py` — header auto-locate + best-effort field guess (deterministic;
   the AI mapper that handles the truly unknown is Phase 1).
 - `pdf_table.py` — `pdfplumber` first, `camelot` for bordered tables. Extracts
