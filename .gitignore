@@ -55,6 +55,7 @@ htmlcov/
 .eslintcache
 test-results/
 playwright-report/
+output/
 
 # Local infrastructure state and financial data
 postgres-data/

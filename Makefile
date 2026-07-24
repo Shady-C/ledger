@@ -57,8 +57,8 @@ check-ts:
 
 check-python:
 	cd $(WORKER_DIR) && $(UV) sync --frozen --extra dev
-	cd $(WORKER_DIR) && $(UV) run --frozen --extra dev python -m ruff check --no-cache worker tests ../../scripts/phase0_smoke.py
+	cd $(WORKER_DIR) && $(UV) run --frozen --extra dev python -m ruff check --no-cache worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py
 	cd $(WORKER_DIR) && $(UV) run --frozen --extra dev python -m mypy worker
 
 smoke:
-	$(UV) run --project $(WORKER_DIR) --frozen --extra dev python scripts/phase0_smoke.py
+	$(UV) run --project $(WORKER_DIR) --frozen --extra dev python scripts/phase1_smoke.py

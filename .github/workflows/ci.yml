@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck
         run: pnpm check
 
+      - name: Install browser runtime
+        run: pnpm --filter @ledger/web exec playwright install --with-deps chromium
+
       - name: Test
         run: pnpm test
 
@@ -66,7 +69,7 @@ jobs:
 
       - name: Ruff
         working-directory: services/worker
-        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py
+        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py
 
       - name: Mypy
         working-directory: services/worker
@@ -131,15 +134,15 @@ jobs:
             psql --host 127.0.0.1 --username ledger --dbname ledger \
             --set ON_ERROR_STOP=1 --file /seeds/001_phase0.sql
 
-      - name: Verify Phase 0 schema
+      - name: Verify Phase 1 schema
         run: |
           table_count="$(docker run --rm --network host \
             --env PGPASSWORD=ledger_test_password \
             pgvector/pgvector:0.8.2-pg16-bookworm \
             psql --host 127.0.0.1 --username ledger --dbname ledger \
             --set ON_ERROR_STOP=1 --tuples-only --no-align \
-            --command "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('institution','account','statement','category','merchant','txn','job','adapter','fx_rate');")"
-          test "$table_count" = "9"
+            --command "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('institution','account','statement','category','merchant','txn','job','adapter','fx_rate','ledger_settings','merchant_category_mapping','categorization_proposal');")"
+          test "$table_count" = "12"
           vector_count="$(docker run --rm --network host \
             --env PGPASSWORD=ledger_test_password \
             pgvector/pgvector:0.8.2-pg16-bookworm \
@@ -161,6 +164,34 @@ jobs:
             --set ON_ERROR_STOP=1 --tuples-only --no-align \
             --command "select count(*) from pg_constraint where conname = 'statement_account_source_file_unique';")"
           test "$source_key_constraint_count" = "1"
+          base_currency="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select base_currency from ledger_settings where singleton;")"
+          test "$base_currency" = "CAD"
+          phase1_job_constraint_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from pg_constraint where conname = 'job_kind_valid';")"
+          test "$phase1_job_constraint_count" = "1"
+          ofx_identity_index_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from pg_indexes where schemaname = 'public' and indexname = 'txn_ofx_fitid_identity_idx';")"
+          test "$ofx_identity_index_count" = "1"
+          category_kind_trigger_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from pg_trigger where tgname = 'category_referenced_kind_immutable' and not tgisinternal;")"
+          test "$category_kind_trigger_count" = "1"
 
   containers:
     name: Container stack
@@ -186,8 +217,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: services/worker/uv.lock
 
-      - name: Start Phase 0 stack
-        run: docker compose up --build --detach
+      - name: Start Phase 1 stack
+        run: WORKER_PROVIDER_MODE=stub docker compose up --build --detach
 
       - name: Wait for healthy API
         run: |
@@ -195,7 +226,7 @@ jobs:
             --retry 30 --retry-all-errors --retry-delay 2 \
             http://127.0.0.1:3000/api/health
 
-      - name: Run golden ingestion smoke test
+      - name: Run Phase 1 smoke test
         run: make smoke
 
       - name: Show service state on failure
