@@ -1,0 +1,7 @@
+Synthetic Bank Statement
+Statement Period,2026-01-01 to 2026-01-31
+Opening Balance,CAD 100.00
+Closing Balance,CAD 110.00
+Date,Description,Debit,Credit,Currency,Reference
+2026-01-03,Synthetic Market,25.00,,CAD,SYN-1
+2026-01-15,Payment Received,,15.00,CAD,SYN-2
