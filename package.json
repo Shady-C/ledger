@@ -1,0 +1,17 @@
+{
+  "name": "ledger",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-hostable, deterministic personal-finance ledger",
+  "packageManager": "pnpm@11.4.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.4.0 <12"
+  },
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "check": "pnpm --recursive --if-present run check",
+    "dev": "pnpm --parallel --recursive --if-present run dev",
+    "test": "pnpm --recursive --if-present run test"
+  }
+}

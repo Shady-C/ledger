@@ -1,0 +1,92 @@
+@import '@fontsource-variable/manrope/index.css';
+
+:root {
+  font-family: 'Manrope Variable', 'Avenir Next', Avenir, system-ui, sans-serif;
+  color: #172625;
+  background: #f4f2ec;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --ink: #172625;
+  --muted: #64706d;
+  --paper: #fcfbf7;
+  --line: #dcded7;
+  --forest: #102b2a;
+  --forest-mid: #1a4844;
+  --mint: #a7d7c8;
+  --coral: #e36f54;
+  --coral-soft: #f7d9ce;
+  --gold: #dab75b;
+  --shadow: 0 18px 50px rgb(18 42 39 / 8%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  color-scheme: light;
+  background: #f4f2ec;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 10% -10%, rgb(167 215 200 / 34%), transparent 31rem),
+    #f4f2ec;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select,
+[tabindex] {
+  outline-offset: 3px;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid #d59447;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
