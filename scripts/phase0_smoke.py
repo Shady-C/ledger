@@ -9,7 +9,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -112,7 +112,7 @@ def json_request(
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise AssertionError(f"{method} {path} returned {error.code}: {detail}") from error
-    return json.loads(payload)
+    return cast(dict[str, Any], json.loads(payload))
 
 
 def multipart(account_id: str, files: list[tuple[str, bytes]]) -> tuple[bytes, str]:

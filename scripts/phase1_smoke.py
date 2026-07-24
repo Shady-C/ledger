@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import phase0_smoke
 
@@ -142,7 +142,10 @@ def create_account(
         "accountRefMasked": masked,
         "creditLimit": credit_limit,
     }
-    return api_json("/api/accounts", method="POST", payload=payload)["account"]
+    return cast(
+        dict[str, Any],
+        api_json("/api/accounts", method="POST", payload=payload)["account"],
+    )
 
 
 def wait_for_background_jobs(required_kinds: set[str]) -> None:

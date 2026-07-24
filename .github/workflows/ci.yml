@@ -69,20 +69,23 @@ jobs:
 
       - name: Ruff
         working-directory: services/worker
-        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py
+        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
 
       - name: Mypy
         working-directory: services/worker
-        run: uv run --frozen --extra dev python -m mypy worker
+        run: uv run --frozen --extra dev python -m mypy worker ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
 
       - name: Test
         working-directory: services/worker
         run: uv run --frozen --extra dev python -m pytest
 
   database:
-    name: Database migrations
+    name: Phase 2 database
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      LEDGER_PHASE2_ACCEPTANCE_ADMIN_URL: "postgresql://ledger:ledger_test_password@127.0.0.1:5432/postgres?sslmode=disable"
+      LEDGER_BENCHMARK_ADMIN_URL: "postgresql://ledger:ledger_test_password@127.0.0.1:5432/postgres?sslmode=disable"
     services:
       postgres:
         image: pgvector/pgvector:0.8.2-pg16-bookworm
@@ -100,6 +103,22 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          enable-cache: true
+          cache-dependency-glob: services/worker/uv.lock
+
+      - name: Sync locked worker environment
+        working-directory: services/worker
+        run: uv sync --frozen --extra dev
 
       - name: Validate Compose model
         run: docker compose config --quiet
@@ -134,7 +153,7 @@ jobs:
             psql --host 127.0.0.1 --username ledger --dbname ledger \
             --set ON_ERROR_STOP=1 --file /seeds/001_phase0.sql
 
-      - name: Verify Phase 1 schema
+      - name: Verify Phase 2 schema
         run: |
           table_count="$(docker run --rm --network host \
             --env PGPASSWORD=ledger_test_password \
@@ -193,8 +212,31 @@ jobs:
             --command "select count(*) from pg_trigger where tgname = 'category_referenced_kind_immutable' and not tgisinternal;")"
           test "$category_kind_trigger_count" = "1"
 
+          phase2_shape="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select concat_ws('|',
+              (select count(*) from schema_migrations where version in ('202607240012','202607240013')),
+              (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'txn' and column_name in ('original_amount','original_currency','fx_fee_amount_native','is_fx_fee')),
+              (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'txn' and column_name in ('amount_base','fx_rate','fx_rate_date') and is_nullable = 'YES'),
+              (select count(*) from pg_constraint where conname in ('ledger_settings_phase2_cad_only','txn_phase2_cad_base','analytics_monthly_currency_fixed')),
+              (select count(*) from pg_trigger where tgname in ('statement_account_currency_matches','transaction_account_currency_matches') and not tgisinternal),
+              (select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('analytics_run','analytics_settings','analytics_monthly_aggregate','recurring_series','recurring_occurrence','insight_finding')),
+              (select count(*) from information_schema.views where table_schema = 'public' and table_name = 'analytics_monthly_current'),
+              (select count(*) from pg_constraint where conname = 'job_kind_valid' and position('analytics_refresh' in pg_get_constraintdef(oid)) > 0)
+            );")"
+          test "$phase2_shape" = "2|4|3|3|2|6|1|1"
+
+      - name: Run Phase 2 migration acceptance
+        run: make phase2-db-acceptance
+
+      - name: Run Phase 2 analytics benchmark
+        run: make benchmark-analytics
+
   containers:
-    name: Container stack
+    name: Phase 2 container stack
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -217,7 +259,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: services/worker/uv.lock
 
-      - name: Start Phase 1 stack
+      - name: Start Phase 2 stack
         run: WORKER_PROVIDER_MODE=stub docker compose up --build --detach
 
       - name: Wait for healthy API
@@ -226,15 +268,15 @@ jobs:
             --retry 30 --retry-all-errors --retry-delay 2 \
             http://127.0.0.1:3000/api/health
 
-      - name: Run Phase 1 smoke test
+      - name: Run Phase 2 smoke test
         run: make smoke
 
-      - name: Show service state on failure
+      - name: Show Phase 2 service state on failure
         if: failure()
         run: |
           docker compose ps --all
           docker compose logs --no-color --tail=200
 
-      - name: Stop stack
+      - name: Stop Phase 2 stack
         if: always()
         run: docker compose down --volumes --remove-orphans
