@@ -31,6 +31,10 @@
   function submit() {
     onFilter({ search, accountId, categoryId, direction, from, to, sort });
   }
+
+  function differs(left: string, right: string) {
+    return left !== right;
+  }
 </script>
 
 <section class="transactions" aria-labelledby="transactions-title">
@@ -105,8 +109,7 @@
           <th scope="col">Processed date</th>
           <th scope="col">Description</th>
           <th scope="col">Category</th>
-          <th scope="col" class="number">Native amount</th>
-          <th scope="col" class="number">Base amount</th>
+          <th scope="col" class="number">Amount</th>
           <th scope="col" class="number">Running balance</th>
         </tr>
       </thead>
@@ -114,12 +117,12 @@
         {#if loading}
           {#each Array(5) as _}
             <tr class="placeholder">
-              <td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td>
+              <td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td>
             </tr>
           {/each}
         {:else if data.items.length === 0}
           <tr>
-            <td colspan="6">
+            <td colspan="5">
               <div class="empty">
                 <strong>{search || accountId || categoryId || direction || from || to ? 'No matching transactions' : 'Your ledger is empty'}</strong>
                 <span>{search || accountId || categoryId || direction || from || to ? 'Try clearing one of the filters.' : 'Imported transactions will appear here.'}</span>
@@ -144,15 +147,30 @@
               <td>
                 <CategoryCell {transaction} {categories} onSave={onCategorySave} />
               </td>
-              <td class:credit={Number(transaction.amountNative) < 0} class="number amount">
-                {money(transaction.amountNative, transaction.currencyNative)}
-              </td>
-              <td class:credit={Number(transaction.amountBase) < 0} class="number amount base-amount">
-                {money(transaction.amountBase, transaction.currencyBase)}
+              <td class:credit={Number(transaction.amountNative) < 0} class="number amount amount-stack">
+                {#if transaction.originalAmount != null && transaction.originalCurrency != null && (transaction.originalCurrency !== transaction.currencyNative || differs(transaction.originalAmount, transaction.amountNative))}
+                  <span><small>Original</small>{money(transaction.originalAmount, transaction.originalCurrency)}</span>
+                {/if}
+                <span><small>Posted</small>{money(transaction.amountNative, transaction.currencyNative)}</span>
+                {#if transaction.amountBase == null}
+                  <span class="pending"><small>Reporting</small>CAD valuation pending</span>
+                {:else if transaction.currencyBase !== transaction.currencyNative || differs(transaction.amountBase, transaction.amountNative)}
+                  <span class="reporting"><small>Reporting</small>{money(transaction.amountBase, transaction.currencyBase)}</span>
+                {/if}
+                {#if transaction.fxFeeAmountNative != null}
+                  <span class="fee"><small>Actual FX fee</small>{money(transaction.fxFeeAmountNative, transaction.currencyNative)}</span>
+                {:else if transaction.isFxFee}
+                  <span class="fee"><small>Standalone FX fee</small>Included above</span>
+                {/if}
               </td>
               <td class="number balance">
-                {money(transaction.runningBalanceBase ?? transaction.runningBalance, transaction.currencyBase)}
-                {#if transaction.runningBalanceNative && transaction.currencyNative !== transaction.currencyBase}
+                {#if transaction.runningBalanceBase != null}
+                  {money(transaction.runningBalanceBase, transaction.currencyBase)}
+                {:else}
+                  {money(transaction.runningBalanceNative, transaction.currencyNative)}
+                  <small>CAD balance pending</small>
+                {/if}
+                {#if transaction.runningBalanceBase != null && transaction.runningBalanceNative && transaction.currencyNative !== transaction.currencyBase}
                   <small>{money(transaction.runningBalanceNative, transaction.currencyNative)} native</small>
                 {/if}
               </td>
@@ -290,7 +308,7 @@
 
   table {
     width: 100%;
-    min-width: 990px;
+    min-width: 900px;
     border-collapse: collapse;
   }
 
@@ -314,6 +332,12 @@
   tbody tr:not(.placeholder):hover { background: #faf9f5; }
   td { font-size: 0.75rem; }
   .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .amount-stack { display: grid; justify-items: end; gap: 0.18rem; }
+  .amount-stack > span { display: flex; align-items: baseline; justify-content: flex-end; gap: 0.35rem; }
+  .amount-stack small { color: var(--muted); font-size: 0.54rem; font-weight: 750; text-transform: uppercase; }
+  .amount-stack .reporting { color: var(--forest); }
+  .amount-stack .pending { color: var(--muted); font-size: 0.64rem; }
+  .amount-stack .fee { color: var(--coral); font-size: 0.64rem; }
   .date { color: var(--muted); white-space: nowrap; }
   .date small { display: block; margin-top: 0.12rem; font-size: 0.62rem; }
   .description { display: grid; gap: 0.17rem; min-width: 220px; }
@@ -321,7 +345,6 @@
   .description span { max-width: 42ch; overflow: hidden; color: var(--muted); font-size: 0.65rem; text-overflow: ellipsis; white-space: nowrap; }
   .amount { color: var(--ink); font-weight: 800; }
   .amount.credit { color: #237a64; }
-  .base-amount { color: #40504d; }
   .balance { color: var(--muted); }
   .balance small { display: block; margin-top: 0.15rem; font-size: 0.58rem; }
 

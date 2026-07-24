@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import type {
     AccountsResponse,
-    InstitutionsResponse,
-    JobResponse,
-    SettingsResponse
+    InstitutionsResponse
   } from '@ledger/shared-types';
 
   import AccountForm from '$lib/components/AccountForm.svelte';
@@ -32,28 +30,20 @@
   let savingInstitution = false;
   let editingInstitutionId = '';
   let editingInstitutionName = '';
-  let baseCurrency = 'CAD';
-  let selectedBaseCurrency = 'CAD';
-  let switchingBase = false;
-  let basePollTimer: ReturnType<typeof setTimeout> | undefined;
 
   $: assets = accounts.filter((account) => account.kind !== 'credit_card');
   $: cards = accounts.filter((account) => account.kind === 'credit_card');
-  $: supportedCurrencies = Array.from(new Set(['CAD', 'USD', 'TZS', ...accounts.map((account) => account.nativeCurrency)])).sort();
 
   async function load() {
     loading = true;
     pageError = '';
     try {
-      const [accountResult, institutionResult, settings] = await Promise.all([
+      const [accountResult, institutionResult] = await Promise.all([
         readJson<AccountsResponse>('/api/accounts'),
-        readOptionalJson<InstitutionsResponse>('/api/institutions').catch(() => null),
-        readOptionalJson<SettingsResponse>('/api/settings').catch(() => null)
+        readOptionalJson<InstitutionsResponse>('/api/institutions').catch(() => null)
       ]);
       accounts = accountResult.accounts;
       institutions = institutionResult?.institutions ?? [];
-      baseCurrency = settings?.baseCurrency ?? accountResult.accounts[0]?.baseCurrency ?? 'CAD';
-      selectedBaseCurrency = baseCurrency;
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'Accounts are temporarily unavailable.';
     } finally {
@@ -97,66 +87,12 @@
     }
   }
 
-  async function changeBaseCurrency() {
-    if (selectedBaseCurrency === baseCurrency || switchingBase) return;
-    switchingBase = true;
-    pageError = '';
-    try {
-      const accepted = await sendJson<{ jobId: string; kind: 'base_currency_rebuild'; status: 'queued' }>(
-        '/api/settings/base-currency',
-        'POST',
-        { baseCurrency: selectedBaseCurrency }
-      );
-      message = `Valuation rebuild queued (${accepted.jobId.slice(0, 8)}…). Ledger will keep showing ${baseCurrency} until it completes.`;
-      await pollBaseCurrency(accepted.jobId);
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'The base-currency rebuild could not be queued.';
-      selectedBaseCurrency = baseCurrency;
-      switchingBase = false;
-    }
-  }
-
-  async function pollBaseCurrency(jobId: string, attempt = 0): Promise<void> {
-    if (attempt > 600) {
-      pageError = 'The valuation rebuild is still running. Refresh this page to check its result.';
-      selectedBaseCurrency = baseCurrency;
-      switchingBase = false;
-      return;
-    }
-    try {
-      const job = await readJson<JobResponse>(`/api/jobs/${jobId}`, 'The valuation rebuild status could not be checked.');
-      if (job.status === 'done') {
-        if (job.kind !== 'base_currency_rebuild' || !job.result?.settingsUpdated) {
-          throw new Error('The valuation rebuild finished without activating the new currency.');
-        }
-        await load();
-        message = `${job.result.targetBaseCurrency} is now the active base currency. Every consolidated value was rebuilt atomically.`;
-        switchingBase = false;
-        return;
-      }
-      if (job.status === 'failed' || job.status === 'needs_ai') {
-        pageError = job.error ?? 'The valuation rebuild failed. The previous base currency remains active.';
-        selectedBaseCurrency = baseCurrency;
-        switchingBase = false;
-        return;
-      }
-      basePollTimer = setTimeout(() => void pollBaseCurrency(jobId, attempt + 1), 1500);
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'The valuation rebuild status could not be checked.';
-      selectedBaseCurrency = baseCurrency;
-      switchingBase = false;
-    }
-  }
-
   onMount(load);
-  onDestroy(() => {
-    if (basePollTimer) clearTimeout(basePollTimer);
-  });
 </script>
 
 <svelte:head>
   <title>Accounts · Ledger</title>
-  <meta name="description" content="Manage asset accounts, credit cards, institutions, limits, and valuation currency." />
+  <meta name="description" content="Manage native-currency asset accounts, credit cards, institutions, and limits." />
 </svelte:head>
 
 <div class="page">
@@ -164,7 +100,7 @@
     <div class="page-header-copy">
       <p class="eyebrow">Balance sheet</p>
       <h1>Assets and credit, separated.</h1>
-      <p class="lede">Keep account identity and native currency explicit, add card limits, and choose the currency used for consolidated views.</p>
+      <p class="lede">Keep account identity and native currency explicit while consolidated reporting remains a derived CAD lens.</p>
     </div>
   </header>
 
@@ -226,12 +162,8 @@
 
     <div class="side-stack">
       <article class="panel" aria-labelledby="currency-title">
-        <div class="panel-heading"><div><h2 id="currency-title">Base currency</h2><p>Current consolidated valuation: {baseCurrency}</p></div></div>
-        <form class="inline-form" on:submit|preventDefault={changeBaseCurrency}>
-          <label class="field"><span>Display currency</span><select bind:value={selectedBaseCurrency}>{#each supportedCurrencies as currency}<option value={currency}>{currency}</option>{/each}</select></label>
-          <button class="button" type="submit" disabled={selectedBaseCurrency === baseCurrency || switchingBase}>{switchingBase ? 'Queuing…' : 'Rebuild values'}</button>
-        </form>
-        <p class="fine-print">The switch becomes visible only after every historical rate is available and the rebuild succeeds.</p>
+        <div class="panel-heading"><div><h2 id="currency-title">Reporting currency</h2><p>Consolidated values use CAD.</p></div></div>
+        <p class="fine-print">Each account keeps its own posted currency. CAD is a derived reporting lens; unavailable historical rates remain visibly pending.</p>
       </article>
 
       <article class="panel" aria-labelledby="institutions-title">

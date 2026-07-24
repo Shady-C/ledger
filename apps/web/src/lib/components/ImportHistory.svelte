@@ -4,7 +4,7 @@
 
   type JobListItem = {
     id: string;
-    kind: 'ingest' | 'categorize' | 'fx_refresh' | 'base_currency_rebuild';
+    kind: 'ingest' | 'categorize' | 'fx_refresh' | 'base_currency_rebuild' | 'analytics_refresh';
     status: 'queued' | 'claimed' | 'done' | 'failed' | 'needs_ai';
     createdAt: string;
     finishedAt: string | null;

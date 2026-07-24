@@ -5,6 +5,7 @@
     BalanceResponse,
     CashflowResponse,
     FxAnalyticsResponse,
+    InsightSummaryResponse,
     NetWorthResponse
   } from '@ledger/shared-types';
 
@@ -23,6 +24,7 @@
   let transactions: TransactionPageView = { items: [], page: 1, pageSize: 6, total: 0, totalPages: 0 };
   let netWorth: NetWorthResponse | null = null;
   let fx: FxAnalyticsResponse | null = null;
+  let insights: InsightSummaryResponse | null = null;
   let creditUtilization: AccountsResponse['creditUtilization'] | null = null;
   let selectedAccount = '';
   let loading = true;
@@ -35,6 +37,7 @@
   $: worth = netWorth?.netWorth ?? null;
   $: latestCashflow = cashflow.points.at(-1);
   $: partial = netWorth?.status === 'partial';
+  $: analyticsPartial = insights?.coverage.status === 'partial';
 
   type DashboardSnapshot = {
     accountResult: AccountsResponse;
@@ -43,6 +46,7 @@
     transactionResult: TransactionPageView;
     worthResult: NetWorthResponse | null;
     fxResult: FxAnalyticsResponse | null;
+    insightResult: InsightSummaryResponse | null;
   };
 
   function snapshotBaseCurrencies(snapshot: DashboardSnapshot) {
@@ -53,6 +57,7 @@
       snapshot.cashflowResult.currency,
       ...(snapshot.worthResult ? [snapshot.worthResult.baseCurrency] : []),
       ...(snapshot.fxResult ? [snapshot.fxResult.baseCurrency] : []),
+      ...(snapshot.insightResult ? [snapshot.insightResult.baseCurrency] : []),
       ...snapshot.transactionResult.items.map((transaction) => transaction.currencyBase)
     ]);
   }
@@ -60,14 +65,16 @@
   async function fetchDashboardSnapshot(attempt = 0): Promise<DashboardSnapshot> {
     const accountResult = await readJson<AccountsResponse>('/api/accounts');
     const analyticsSuffix = selectedAccount ? `?accountId=${encodeURIComponent(selectedAccount)}` : '';
-    const [balanceResult, cashflowResult, transactionResult, worthResult, fxResult] = await Promise.all([
+    const insightSuffix = `?range=12m${selectedAccount ? `&accountId=${encodeURIComponent(selectedAccount)}` : ''}`;
+    const [balanceResult, cashflowResult, transactionResult, worthResult, fxResult, insightResult] = await Promise.all([
       readJson<BalanceResponse>(`/api/analytics/balance${analyticsSuffix}`),
       readJson<CashflowResponse>(`/api/analytics/cashflow${analyticsSuffix}`),
       readJson<TransactionPageView>(`/api/transactions?pageSize=6${selectedAccount ? `&accountId=${encodeURIComponent(selectedAccount)}` : ''}`),
       readOptionalJson<NetWorthResponse>('/api/analytics/net-worth').catch(() => null),
-      readOptionalJson<FxAnalyticsResponse>('/api/analytics/fx').catch(() => null)
+      readOptionalJson<FxAnalyticsResponse>('/api/analytics/fx').catch(() => null),
+      readOptionalJson<InsightSummaryResponse>(`/api/insights/summary${insightSuffix}`).catch(() => null)
     ]);
-    const snapshot = { accountResult, balanceResult, cashflowResult, transactionResult, worthResult, fxResult };
+    const snapshot = { accountResult, balanceResult, cashflowResult, transactionResult, worthResult, fxResult, insightResult };
 
     if (snapshotBaseCurrencies(snapshot).size > 1) {
       if (attempt < 2) {
@@ -89,7 +96,8 @@
         cashflowResult,
         transactionResult,
         worthResult,
-        fxResult
+        fxResult,
+        insightResult
       } = await fetchDashboardSnapshot();
       accounts = accountResult.accounts;
       creditUtilization = accountResult.creditUtilization;
@@ -98,6 +106,7 @@
       transactions = transactionResult;
       netWorth = worthResult;
       fx = fxResult;
+      insights = insightResult;
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'The dashboard is temporarily unavailable.';
     } finally {
@@ -146,6 +155,14 @@
     </div>
   {/if}
 
+  {#if analyticsPartial}
+    <div class="status-banner info" role="status">
+      <strong>Historical CAD analytics are partial.</strong>
+      <span>{insights?.coverage.unvaluedTransactionCount ?? 0} transaction{(insights?.coverage.unvaluedTransactionCount ?? 0) === 1 ? '' : 's'} are excluded until a booked-date CAD rate is available.</span>
+      <a class="text-button" href="/insights">Review coverage</a>
+    </div>
+  {/if}
+
   <section class="metrics" aria-label="Net worth summary">
     <article class="metric net-worth">
       <span>Net worth</span>
@@ -163,11 +180,64 @@
       <small>{cards.length} credit {cards.length === 1 ? 'card' : 'cards'}</small>
     </article>
     <article class="metric">
-      <span>Estimated FX fees</span>
-      <strong>{loading || fx?.totalEstimatedFeeBase == null ? '—' : money(fx.totalEstimatedFeeBase, fx.baseCurrency)}</strong>
-      <small>{fx ? `${fx.transactions.length} foreign-spend records` : 'Waiting for comparable rates'}</small>
+      <span>FX costs</span>
+      <strong>{loading || fx?.totalFxCostBase == null ? '—' : money(fx.totalFxCostBase, fx.baseCurrency)}</strong>
+      <small>{fx ? `Actual fees ${money(fx.totalExplicitFeeBase, fx.baseCurrency)} · estimated markup ${money(fx.totalEstimatedMarkupBase, fx.baseCurrency)}` : 'Actual fees and estimated markup are reported separately'}</small>
     </article>
   </section>
+
+  {#if fx && fx.transactions.length > 0}
+    <details class="fx-breakdown panel">
+      <summary>
+        <span>
+          <strong>FX rate and cost evidence</strong>
+          <small>Statement fees are actual. Market-rate markup is an estimate.</small>
+        </span>
+        <span>{fx.missingRateCount > 0 ? `${fx.missingRateCount} rate${fx.missingRateCount === 1 ? '' : 's'} pending` : 'All rates available'}</span>
+      </summary>
+      <div class="fx-evidence-list">
+        {#each fx.transactions.slice(0, 5) as transaction}
+          <article>
+            <div>
+              <strong>{transaction.description}</strong>
+              <small>{transaction.accountName} · {transaction.bookedDate}</small>
+            </div>
+            <dl>
+              {#if transaction.foreignCurrency && transaction.bankAppliedRate}
+                <div><dt>Bank-applied rate</dt><dd>1 {transaction.foreignCurrency} = {transaction.bankAppliedRate} {transaction.nativeCurrency}</dd></div>
+              {/if}
+              {#if transaction.foreignCurrency && transaction.marketRate}
+                <div><dt>Reference market rate</dt><dd>1 {transaction.foreignCurrency} = {transaction.marketRate} {transaction.nativeCurrency}{transaction.marketRateDate ? ` · ${transaction.marketRateDate}` : ''}</dd></div>
+              {:else if transaction.foreignCurrency || transaction.explicitFeeBase == null}
+                <div><dt>Reference market rate</dt><dd>Pending</dd></div>
+              {/if}
+              {#if transaction.explicitFeeNative !== '0'}
+                <div><dt>Actual statement fee</dt><dd>{money(transaction.explicitFeeNative, transaction.nativeCurrency)}{transaction.explicitFeeBase ? ` · ${money(transaction.explicitFeeBase, fx.baseCurrency)}` : ' · CAD pending'}</dd></div>
+              {/if}
+              {#if transaction.estimatedMarkupNative != null}
+                <div><dt>Estimated markup</dt><dd>{transaction.markupPercent ?? '0'}% · {money(transaction.estimatedMarkupNative, transaction.nativeCurrency)}{transaction.estimatedMarkupBase ? ` · ${money(transaction.estimatedMarkupBase, fx.baseCurrency)}` : ' · CAD pending'}</dd></div>
+              {/if}
+            </dl>
+          </article>
+        {/each}
+      </div>
+      {#if fx.transactions.length > 5}<p class="fx-more">Showing 5 of {fx.transactions.length} FX-related records.</p>{/if}
+    </details>
+  {/if}
+
+  <a class="insights-summary panel" href="/insights" aria-label={`Open Insights${insights?.findings.unread ? `, ${insights.findings.unread} unread findings` : ''}`}>
+    <div>
+      <span class="eyebrow">Insights</span>
+      <strong>{insights ? `${insights.recurring.activeSeries} recurring patterns` : 'Explore ledger patterns'}</strong>
+      <small>{insights?.coverage.status === 'partial' ? `${insights.coverage.unvaluedTransactionCount} transactions await CAD valuation.` : 'Trends, seasonality, recurring activity, and explainable findings.'}</small>
+    </div>
+    <span class="insight-action">
+      {#if insights?.findings.unread}
+        <span class="unread-badge">{insights.findings.unread} new</span>
+      {/if}
+      Review insights <span aria-hidden="true">→</span>
+    </span>
+  </a>
 
   <AccountStrip {accounts} {loading} selected={selectedAccount} onSelect={selectAccount} />
 
@@ -281,6 +351,27 @@
   .metric strong.negative,
   .metric.liability strong { color: var(--coral); }
   .metric small { color: var(--muted); font-size: 0.62rem; }
+  .fx-breakdown { padding: 0; overflow: clip; }
+  .fx-breakdown summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.15rem; cursor: pointer; list-style-position: inside; }
+  .fx-breakdown summary > span:first-child { display: inline-grid; gap: 0.2rem; margin-left: 0.35rem; }
+  .fx-breakdown summary small,
+  .fx-breakdown summary > span:last-child,
+  .fx-evidence-list small,
+  .fx-more { color: var(--muted); font-size: 0.64rem; }
+  .fx-evidence-list { display: grid; border-top: 1px solid var(--line); }
+  .fx-evidence-list article { display: grid; grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.3fr); gap: 1rem; padding: 0.9rem 1.15rem; border-bottom: 1px solid var(--line); }
+  .fx-evidence-list article > div { display: grid; align-content: start; gap: 0.2rem; }
+  .fx-evidence-list dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem 1rem; margin: 0; }
+  .fx-evidence-list dl div { min-width: 0; }
+  .fx-evidence-list dt { color: var(--muted); font-size: 0.58rem; font-weight: 750; text-transform: uppercase; }
+  .fx-evidence-list dd { margin: 0.16rem 0 0; overflow-wrap: anywhere; font-size: 0.68rem; font-variant-numeric: tabular-nums; }
+  .fx-more { margin: 0; padding: 0.8rem 1.15rem; }
+  .insights-summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: inherit; text-decoration: none; }
+  .insights-summary > div { display: grid; gap: 0.22rem; }
+  .insights-summary strong { font-size: 1rem; }
+  .insights-summary small { color: var(--muted); font-size: 0.66rem; }
+  .insight-action { display: flex; align-items: center; gap: 0.55rem; color: var(--forest); font-size: 0.7rem; font-weight: 800; white-space: nowrap; }
+  .unread-badge { padding: 0.25rem 0.45rem; color: white; border-radius: 999px; background: var(--coral); font-size: 0.58rem; }
   .credit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
   .aggregate,
   .card-utilization { display: grid; min-height: 150px; padding: 1rem; align-content: space-between; gap: 1rem; border: 1px solid #e3e4de; border-radius: 14px; background: #f8f7f2; }
@@ -302,11 +393,15 @@
     .metrics { grid-template-columns: repeat(2, 1fr); }
     .credit-grid { grid-template-columns: repeat(2, 1fr); }
     .charts { grid-template-columns: 1fr; }
+    .fx-evidence-list article { grid-template-columns: 1fr; }
   }
   @media (max-width: 620px) {
     .metrics,
     .credit-grid { grid-template-columns: 1fr; }
     .metric { min-height: 112px; }
     .dashboard-header .button { width: 100%; }
+    .insights-summary { align-items: flex-start; flex-direction: column; }
+    .fx-breakdown summary { align-items: flex-start; flex-direction: column; }
+    .fx-evidence-list dl { grid-template-columns: 1fr; }
   }
 </style>

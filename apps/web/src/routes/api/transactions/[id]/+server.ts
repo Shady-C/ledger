@@ -8,6 +8,7 @@ import {
 
 import { apiError, unavailableOrInternal, validationError } from '$lib/server/api.js';
 import { getPool, transactionFlowSql } from '$lib/server/db.js';
+import { enqueueAnalyticsRefresh } from '$lib/server/insights.js';
 
 type TransactionForCategory = {
   id: string;
@@ -117,6 +118,7 @@ export async function PATCH({ params, request }) {
       [transaction.id, category.id, categorySource]
     );
     await client.query('COMMIT');
+    await enqueueAnalyticsRefresh('incremental').catch(() => undefined);
     return json(
       {
         transaction: {

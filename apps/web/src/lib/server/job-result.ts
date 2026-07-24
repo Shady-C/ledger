@@ -1,4 +1,5 @@
 import {
+  workerAnalyticsRefreshJobResultSchema,
   workerBaseCurrencyRebuildJobResultSchema,
   workerCategorizeJobResultSchema,
   workerFxRefreshJobResultSchema,
@@ -87,7 +88,23 @@ export function mapJobResult(
     return {
       baseCurrency: parsed.data.base_currency,
       quoteCurrencies: parsed.data.quote_currencies,
-      ratesStored: parsed.data.rates_stored
+      ratesStored: parsed.data.rates_stored,
+      transactionsUpdated: parsed.data.transactions_updated
+    };
+  }
+
+  if (kind === 'analytics_refresh') {
+    const parsed = workerAnalyticsRefreshJobResultSchema.safeParse(raw);
+    if (!parsed.success) throw new JobResultContractError('The worker returned an invalid analytics refresh result.');
+    return {
+      generation: parsed.data.generation,
+      mode: parsed.data.mode,
+      sourceWatermark: parsed.data.source_watermark,
+      aggregateCount: parsed.data.aggregate_count,
+      recurringSeriesCount: parsed.data.recurring_series_count,
+      findingCount: parsed.data.finding_count,
+      durationMs: parsed.data.duration_ms,
+      affectedPeriods: parsed.data.affected_periods
     };
   }
 

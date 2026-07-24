@@ -6,7 +6,7 @@ import { query } from '$lib/server/db.js';
 
 type JobListRow = {
   id: string;
-  kind: 'ingest' | 'categorize' | 'fx_refresh' | 'base_currency_rebuild';
+  kind: 'ingest' | 'categorize' | 'fx_refresh' | 'base_currency_rebuild' | 'analytics_refresh';
   status: 'queued' | 'claimed' | 'done' | 'failed' | 'needs_ai';
   created_at: Date;
   finished_at: Date | null;

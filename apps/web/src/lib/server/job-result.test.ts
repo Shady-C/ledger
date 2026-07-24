@@ -57,6 +57,30 @@ describe('mapJobResult', () => {
     ).toEqual({ scanned: 8, autoApplied: 5, proposalsCreated: 2, unchanged: 1 });
   });
 
+  it('maps analytics refresh metadata without losing generation identity', () => {
+    expect(
+      mapJobResult('analytics_refresh', 'done', {
+        generation: 4,
+        mode: 'incremental',
+        source_watermark: '2026-07-24T10:00:00.123456+00:00',
+        aggregate_count: 18,
+        recurring_series_count: 3,
+        finding_count: 2,
+        duration_ms: 45,
+        affected_periods: ['2026-07-01']
+      })
+    ).toEqual({
+      generation: 4,
+      mode: 'incremental',
+      sourceWatermark: '2026-07-24T10:00:00.123456+00:00',
+      aggregateCount: 18,
+      recurringSeriesCount: 3,
+      findingCount: 2,
+      durationMs: 45,
+      affectedPeriods: ['2026-07-01']
+    });
+  });
+
   it('rejects a result whose payload does not match its job kind', () => {
     expect(() =>
       mapJobResult('base_currency_rebuild', 'done', {

@@ -47,19 +47,25 @@ type FxRow = {
   account_name: string;
   booked_date: string;
   description_raw: string;
-  foreign_amount: string;
-  foreign_currency: string;
+  foreign_amount: string | null;
+  foreign_currency: string | null;
   charged_amount_native: string;
   native_currency: string;
-  card_applied_rate: string;
+  bank_applied_rate: string | null;
   market_rate: string | null;
   market_rate_date: string | null;
   market_rate_source: string | null;
   markup_percent: string | null;
-  estimated_fee_native: string | null;
-  estimated_fee_base: string | null;
+  explicit_fee_native: string;
+  explicit_fee_base: string | null;
+  estimated_markup_native: string | null;
+  estimated_markup_base: string | null;
+  is_fx_fee: boolean;
   base_currency: string;
-  total_estimated_fee_base: string;
+  total_explicit_fee_base: string;
+  total_estimated_markup_base: string;
+  total_fx_cost_base: string;
+  missing_rate_count: number;
 };
 
 export async function GET({ params, url }) {
@@ -156,7 +162,11 @@ export async function GET({ params, url }) {
       return json(
         {
           baseCurrency: result.rows[0]?.base_currency ?? currency,
-          totalEstimatedFeeBase: result.rows[0]?.total_estimated_fee_base ?? '0',
+          status: (result.rows[0]?.missing_rate_count ?? 0) > 0 ? 'partial' : 'complete',
+          totalExplicitFeeBase: result.rows[0]?.total_explicit_fee_base ?? '0',
+          totalEstimatedMarkupBase: result.rows[0]?.total_estimated_markup_base ?? '0',
+          totalFxCostBase: result.rows[0]?.total_fx_cost_base ?? '0',
+          missingRateCount: result.rows[0]?.missing_rate_count ?? 0,
           transactions: result.rows.map((row) => ({
             transactionId: row.transaction_id,
             accountId: row.account_id,
@@ -167,13 +177,16 @@ export async function GET({ params, url }) {
             foreignCurrency: row.foreign_currency,
             chargedAmountNative: row.charged_amount_native,
             nativeCurrency: row.native_currency,
-            cardAppliedRate: row.card_applied_rate,
+            bankAppliedRate: row.bank_applied_rate,
             marketRate: row.market_rate,
             marketRateDate: row.market_rate_date,
             marketRateSource: row.market_rate_source,
             markupPercent: row.markup_percent,
-            estimatedFeeNative: row.estimated_fee_native,
-            estimatedFeeBase: row.estimated_fee_base
+            explicitFeeNative: row.explicit_fee_native,
+            explicitFeeBase: row.explicit_fee_base,
+            estimatedMarkupNative: row.estimated_markup_native,
+            estimatedMarkupBase: row.estimated_markup_base,
+            isStandaloneFee: row.is_fx_fee
           }))
         },
         { headers: privateReadHeaders }

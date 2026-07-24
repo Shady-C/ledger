@@ -8,6 +8,7 @@ import {
 
 import { apiError, unavailableOrInternal, validationError } from '$lib/server/api.js';
 import { getPool, transactionFlowSql } from '$lib/server/db.js';
+import { enqueueAnalyticsRefresh } from '$lib/server/insights.js';
 import { postgresErrorCode } from '$lib/server/phase1.js';
 
 type LockedProposal = {
@@ -156,6 +157,9 @@ export async function PATCH({ params, request }) {
       [id.data, categoryId]
     );
     await client.query('COMMIT');
+    if (transactionsUpdated > 0) {
+      await enqueueAnalyticsRefresh('incremental').catch(() => undefined);
+    }
     return json(
       { proposalId: id.data, status: 'accepted', categoryId, transactionsUpdated },
       { headers: { 'cache-control': 'no-store' } }

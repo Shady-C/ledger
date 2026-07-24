@@ -44,7 +44,7 @@ describe('buildTransactionQueries', () => {
 
     expect(built.data.text).not.toContain('Cafe');
     expect(built.data.text).toContain(
-      'ORDER BY ABS(amount_base) DESC, COALESCE(posted_date, booked_date) DESC'
+      'ORDER BY ABS(amount_base) DESC NULLS LAST, COALESCE(posted_date, booked_date) DESC'
     );
     expect(built.data.values).toEqual([
       'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
@@ -62,7 +62,7 @@ describe('buildTransactionQueries', () => {
     );
 
     expect(built.data.text).toContain(
-      'ORDER BY ABS(amount_base) ASC, COALESCE(posted_date, booked_date) DESC'
+      'ORDER BY ABS(amount_base) ASC NULLS LAST, COALESCE(posted_date, booked_date) DESC'
     );
     expect(built.data.values.slice(-2)).toEqual([50, 100]);
   });
@@ -117,7 +117,7 @@ describe('analytics query builders', () => {
     expect(built.text).toContain('(SELECT amount FROM opening)');
     expect(built.text).toContain('COALESCE(t.posted_date, t.booked_date) AS date');
     expect(built.text).toContain('GROUP BY COALESCE(t.posted_date, t.booked_date)');
-    expect(built.text.indexOf('SUM(delta) OVER')).toBeLessThan(built.text.indexOf('WHERE date >='));
+    expect(built.text.indexOf('SUM(delta) OVER')).toBeLessThan(built.text.indexOf('AND date >='));
   });
 
   it('preserves a single card balance while negating cards in consolidated net position', () => {
@@ -135,6 +135,16 @@ describe('analytics query builders', () => {
     expect(card.text).toContain('SUM(t.amount_base) AS delta');
   });
 
+  it('does not render a fabricated running balance after a pending CAD valuation', () => {
+    const built = buildBalanceQuery(analyticsQuerySchema.parse({}));
+
+    expect(built.text).toContain(
+      'COUNT(*) FILTER (WHERE t.amount_base IS NULL) AS pending_fx_count'
+    );
+    expect(built.text).toContain('SUM(pending_fx_count) OVER');
+    expect(built.text).toContain('WHERE balance IS NOT NULL');
+  });
+
   it('excludes unverified or unvalued accounts from net worth without hiding why', () => {
     const built = buildNetWorthQuery();
     expect(built.text).toContain("WHEN NOT verified THEN 'unverified_balance'");
@@ -143,11 +153,15 @@ describe('analytics query builders', () => {
     expect(built.text).toContain('SUM(ABS(LEAST(contribution, 0))) OVER ()');
   });
 
-  it('computes FX markup only from foreign-spend evidence and cached historical rates', () => {
+  it('computes FX costs from first-class evidence and cached historical rates', () => {
     const built = buildFxAnalyticsQuery(analyticsQuerySchema.parse({ from: '2026-01-01' }));
     expect(built.values).toEqual(['2026-01-01']);
-    expect(built.text).toContain("jsonb_typeof(t.enrichment -> 'foreign_spend') = 'object'");
-    expect(built.text).toContain('card_applied_rate / resolved_market_rate - 1');
+    expect(built.text).toContain('t.original_amount IS NOT NULL');
+    expect(built.text).toContain('t.fx_fee_amount_native IS NOT NULL');
+    expect(built.text).toContain('OR t.amount_base IS NULL');
+    expect(built.text).toContain('native_to_base_rate IS NULL');
+    expect(built.text).toContain('bank_applied_rate / resolved_market_rate - 1');
+    expect(built.text).toContain('ABS(t.amount_native) - COALESCE(t.fx_fee_amount_native, 0)');
     expect(built.text).toContain('as_of >= evidence.booked_date - 7');
   });
 

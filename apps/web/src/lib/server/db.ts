@@ -281,9 +281,9 @@ const transactionSortSql: Record<TransactionQuery['sort'], string> = {
   booked_date_asc:
     'COALESCE(posted_date, booked_date) ASC, booked_date ASC, id ASC',
   amount_desc:
-    'ABS(amount_base) DESC, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC',
+    'ABS(amount_base) DESC NULLS LAST, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC',
   amount_asc:
-    'ABS(amount_base) ASC, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC'
+    'ABS(amount_base) ASC NULLS LAST, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC'
 };
 
 function addValue(values: unknown[], value: unknown): string {
@@ -373,9 +373,14 @@ export function buildTransactionQueries(spec: TransactionQuery): {
         t.category_confidence,
         t.amount_native,
         t.currency_native,
+        t.original_amount,
+        t.original_currency,
         t.amount_base,
         t.currency_base,
         t.fx_rate,
+        t.fx_rate_date,
+        t.fx_fee_amount_native,
+        t.is_fx_fee,
         t.direction,
         t.enrichment,
         COALESCE(t.posted_date, t.booked_date) AS effective_date
@@ -398,6 +403,16 @@ export function buildTransactionQueries(spec: TransactionQuery): {
           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) AS running_balance_native,
         CASE
+          WHEN COUNT(*) FILTER (WHERE base.amount_base IS NULL) OVER (
+            PARTITION BY base.account_id
+            ORDER BY
+              base.effective_date,
+              base.statement_period_start NULLS LAST,
+              base.posted_date NULLS LAST,
+              base.booked_date,
+              base.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) > 0 THEN NULL
           WHEN o.opening_balance IS NULL THEN SUM(base.amount_base) OVER (
             PARTITION BY base.account_id
             ORDER BY
@@ -441,9 +456,14 @@ export function buildTransactionQueries(spec: TransactionQuery): {
       category_confidence::text,
       amount_native::text,
       currency_native,
+      original_amount::text,
+      original_currency,
       amount_base::text,
       currency_base,
       fx_rate::text,
+      fx_rate_date::text,
+      fx_fee_amount_native::text,
+      is_fx_fee,
       direction,
       enrichment,
       running_balance_native::text AS running_balance,
@@ -491,7 +511,10 @@ export function buildBalanceQuery(spec: AnalyticsQuery): BuiltQuery {
   const selectedAccountConditions = spec.accountId
     ? [`a.id = ${addValue(values, spec.accountId)}`]
     : [];
-  const outerConditions: string[] = [];
+  // Once an unvalued transaction enters a consolidated running series, every
+  // later CAD balance is unknown until FX enrichment fills that gap. Omit
+  // those points instead of coercing SQL NULL to a misleading chart zero.
+  const outerConditions: string[] = ['balance IS NOT NULL'];
   if (spec.from) outerConditions.push(`date >= ${addValue(values, spec.from)}::date`);
   if (spec.to) outerConditions.push(`date <= ${addValue(values, spec.to)}::date`);
   const selectedWhere = selectedAccountConditions.length
@@ -584,15 +607,21 @@ export function buildBalanceQuery(spec: AnalyticsQuery): BuiltQuery {
       ), daily AS (
         SELECT
           COALESCE(t.posted_date, t.booked_date) AS date,
-          SUM(${transactionContribution}) AS delta
+          SUM(${transactionContribution}) AS delta,
+          COUNT(*) FILTER (WHERE t.amount_base IS NULL) AS pending_fx_count
         FROM txn t
         JOIN selected_accounts selected ON selected.id = t.account_id
         GROUP BY COALESCE(t.posted_date, t.booked_date)
       ), running AS (
         SELECT
           date,
-          (SELECT amount FROM opening)
-            + SUM(delta) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING) AS balance,
+          CASE
+            WHEN SUM(pending_fx_count) OVER (
+              ORDER BY date ROWS UNBOUNDED PRECEDING
+            ) > 0 THEN NULL
+            ELSE (SELECT amount FROM opening)
+              + SUM(delta) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING)
+          END AS balance,
           (SELECT basis FROM opening) AS basis
         FROM daily
       )
@@ -804,11 +833,12 @@ export function buildNetWorthQuery(accountId?: string): BuiltQuery {
 export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
   const values: unknown[] = [];
   const conditions = buildAnalyticsConditions(spec, values);
-  conditions.push("a.kind = 'credit_card'");
-  conditions.push("jsonb_typeof(t.enrichment -> 'foreign_spend') = 'object'");
-  conditions.push("(t.enrichment -> 'foreign_spend' ->> 'amount') ~ '^-?[0-9]+(?:\\.[0-9]+)?$'");
-  conditions.push("(t.enrichment -> 'foreign_spend' ->> 'currency') ~ '^[A-Z]{3}$'");
-  conditions.push("(t.enrichment -> 'foreign_spend' ->> 'amount')::numeric <> 0");
+  conditions.push(`(
+    (t.original_amount IS NOT NULL AND t.original_currency IS NOT NULL)
+    OR t.fx_fee_amount_native IS NOT NULL
+    OR t.is_fx_fee
+    OR t.amount_base IS NULL
+  )`);
   const where = `WHERE ${conditions.join(' AND ')}`;
   return {
     text: `
@@ -823,9 +853,18 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
           a.display_name AS account_name,
           t.booked_date,
           t.description_raw,
-          ABS((t.enrichment -> 'foreign_spend' ->> 'amount')::numeric) AS foreign_amount,
-          t.enrichment -> 'foreign_spend' ->> 'currency' AS foreign_currency,
+          ABS(t.original_amount) AS foreign_amount,
+          t.original_currency AS foreign_currency,
           ABS(t.amount_native) AS charged_amount_native,
+          GREATEST(
+            ABS(t.amount_native) - COALESCE(t.fx_fee_amount_native, 0),
+            0
+          ) AS conversion_amount_native,
+          CASE
+            WHEN t.is_fx_fee THEN ABS(t.amount_native)
+            ELSE COALESCE(t.fx_fee_amount_native, 0)
+          END AS explicit_fee_native,
+          t.is_fx_fee,
           a.native_currency,
           t.fx_rate AS native_to_base_rate,
           setting.base_currency
@@ -836,7 +875,10 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
       ), compared AS (
         SELECT
           evidence.*,
-          evidence.charged_amount_native / evidence.foreign_amount AS card_applied_rate,
+          CASE
+            WHEN evidence.foreign_amount IS NULL OR evidence.foreign_amount = 0 THEN NULL
+            ELSE evidence.conversion_amount_native / evidence.foreign_amount
+          END AS bank_applied_rate,
           market.rate AS market_rate,
           market.as_of AS market_rate_date,
           market.source AS market_rate_source
@@ -850,11 +892,13 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
             AND as_of >= evidence.booked_date - ${FX_MAX_STALENESS_DAYS}
           ORDER BY as_of DESC
           LIMIT 1
-        ) market ON evidence.foreign_currency <> evidence.native_currency
+        ) market ON evidence.foreign_currency IS NOT NULL
+                AND evidence.foreign_currency <> evidence.native_currency
       ), fees AS (
         SELECT
           compared.*,
           CASE
+            WHEN foreign_currency IS NULL THEN NULL
             WHEN foreign_currency = native_currency THEN 1
             ELSE market_rate
           END AS resolved_market_rate
@@ -863,14 +907,33 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
         SELECT
           fees.*,
           CASE
-            WHEN resolved_market_rate IS NULL THEN NULL
-            ELSE ROUND((card_applied_rate / resolved_market_rate - 1) * 100, 4)
+            WHEN resolved_market_rate IS NULL OR bank_applied_rate IS NULL THEN NULL
+            ELSE ROUND((bank_applied_rate / resolved_market_rate - 1) * 100, 4)
           END AS markup_percent,
           CASE
-            WHEN resolved_market_rate IS NULL THEN NULL
-            ELSE ROUND((card_applied_rate - resolved_market_rate) * foreign_amount, 2)
-          END AS estimated_fee_native
+            WHEN resolved_market_rate IS NULL OR bank_applied_rate IS NULL THEN NULL
+            ELSE ROUND((bank_applied_rate - resolved_market_rate) * foreign_amount, 2)
+          END AS estimated_markup_native,
+          CASE
+            WHEN native_to_base_rate IS NULL THEN NULL
+            ELSE ROUND(explicit_fee_native * native_to_base_rate, 2)
+          END AS explicit_fee_base
         FROM fees
+      ), valued AS (
+        SELECT
+          calculated.*,
+          CASE
+            WHEN estimated_markup_native IS NULL OR native_to_base_rate IS NULL THEN NULL
+            ELSE ROUND(estimated_markup_native * native_to_base_rate, 2)
+          END AS estimated_markup_base,
+          (
+            native_to_base_rate IS NULL
+            OR (
+              foreign_amount IS NOT NULL
+              AND (resolved_market_rate IS NULL OR native_to_base_rate IS NULL)
+            )
+          ) AS missing_rate
+        FROM calculated
       )
       SELECT
         transaction_id,
@@ -882,29 +945,40 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
         foreign_currency,
         charged_amount_native::text,
         native_currency,
-        card_applied_rate::text,
+        bank_applied_rate::text,
         resolved_market_rate::text AS market_rate,
         CASE
+          WHEN foreign_currency IS NULL THEN NULL
           WHEN foreign_currency = native_currency THEN booked_date::text
           ELSE market_rate_date::text
         END AS market_rate_date,
         CASE
+          WHEN foreign_currency IS NULL THEN NULL
           WHEN foreign_currency = native_currency THEN 'identity'
           ELSE market_rate_source
         END AS market_rate_source,
         markup_percent::text,
-        estimated_fee_native::text,
-        CASE
-          WHEN estimated_fee_native IS NULL THEN NULL
-          ELSE ROUND(estimated_fee_native * native_to_base_rate, 2)::text
-        END AS estimated_fee_base,
+        explicit_fee_native::text,
+        explicit_fee_base::text,
+        estimated_markup_native::text,
+        estimated_markup_base::text,
+        is_fx_fee,
         base_currency,
         COALESCE(
-          SUM(ROUND(estimated_fee_native * native_to_base_rate, 2))
-            FILTER (WHERE estimated_fee_native IS NOT NULL) OVER (),
+          SUM(explicit_fee_base) FILTER (WHERE explicit_fee_base IS NOT NULL) OVER (),
           0
-        )::text AS total_estimated_fee_base
-      FROM calculated
+        )::text AS total_explicit_fee_base,
+        COALESCE(
+          SUM(estimated_markup_base)
+            FILTER (WHERE estimated_markup_base IS NOT NULL) OVER (),
+          0
+        )::text AS total_estimated_markup_base,
+        COALESCE(
+          SUM(COALESCE(explicit_fee_base, 0) + COALESCE(estimated_markup_base, 0)) OVER (),
+          0
+        )::text AS total_fx_cost_base,
+        (COUNT(*) FILTER (WHERE missing_rate) OVER ())::int AS missing_rate_count
+      FROM valued
       ORDER BY booked_date DESC, transaction_id DESC`,
     values
   };

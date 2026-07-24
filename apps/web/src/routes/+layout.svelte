@@ -8,6 +8,7 @@
     { href: '/transactions', label: 'Transactions', shortLabel: 'Activity', icon: '↕' },
     { href: '/accounts', label: 'Accounts', shortLabel: 'Accounts', icon: '▣' },
     { href: '/categories', label: 'Categories', shortLabel: 'Categories', icon: '◫' },
+    { href: '/insights', label: 'Insights', shortLabel: 'Insights', icon: '◉' },
     { href: '/imports', label: 'Imports', shortLabel: 'Imports', icon: '↑' }
   ] as const;
 
@@ -176,7 +177,7 @@
       bottom: max(0.6rem, env(safe-area-inset-bottom));
       left: 0.6rem;
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       overflow: hidden;
       padding: 0.3rem;
       border: 1px solid rgb(255 255 255 / 12%);

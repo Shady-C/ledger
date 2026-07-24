@@ -22,9 +22,14 @@ type TransactionRow = {
   category_confidence: string | null;
   amount_native: string;
   currency_native: string;
-  amount_base: string;
+  original_amount: string | null;
+  original_currency: string | null;
+  amount_base: string | null;
   currency_base: string;
-  fx_rate: string;
+  fx_rate: string | null;
+  fx_rate_date: string | null;
+  fx_fee_amount_native: string | null;
+  is_fx_fee: boolean;
   direction: 'debit' | 'credit' | 'payment' | 'fee' | 'refund' | 'interest';
   enrichment: Record<string, unknown> | null;
   running_balance: string;
@@ -60,9 +65,15 @@ export async function GET({ url }) {
           categoryConfidence: row.category_confidence,
           amountNative: row.amount_native,
           currencyNative: row.currency_native,
+          originalAmount: row.original_amount,
+          originalCurrency: row.original_currency,
           amountBase: row.amount_base,
           currencyBase: row.currency_base,
           fxRate: row.fx_rate,
+          fxRateDate: row.fx_rate_date,
+          fxFeeAmountNative: row.fx_fee_amount_native,
+          isFxFee: row.is_fx_fee,
+          valuationStatus: row.amount_base == null ? 'pending_fx' : 'valued',
           direction: row.direction,
           runningBalance: row.running_balance,
           runningBalanceNative: row.running_balance_native,
