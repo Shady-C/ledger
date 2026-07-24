@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm check
+
+      - name: Test
+        run: pnpm test
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          enable-cache: true
+          cache-dependency-glob: services/worker/uv.lock
+
+      - name: Sync locked worker environment
+        working-directory: services/worker
+        run: uv sync --frozen --extra dev
+
+      - name: Ruff
+        working-directory: services/worker
+        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py
+
+      - name: Mypy
+        working-directory: services/worker
+        run: uv run --frozen --extra dev python -m mypy worker
+
+      - name: Test
+        working-directory: services/worker
+        run: uv run --frozen --extra dev python -m pytest
+
+  database:
+    name: Database migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg16-bookworm
+        env:
+          POSTGRES_DB: ledger
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger -d ledger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose model
+        run: docker compose config --quiet
+
+      - name: Apply migrations twice
+        run: |
+          docker run --rm --network host \
+            --env DATABASE_URL="postgresql://ledger:ledger_test_password@127.0.0.1:5432/ledger?sslmode=disable" \
+            --env DBMATE_MIGRATIONS_DIR=/db/migrations \
+            --env DBMATE_NO_DUMP_SCHEMA=true \
+            --volume "$GITHUB_WORKSPACE/db/migrations:/db/migrations:ro" \
+            ghcr.io/amacneil/dbmate:2.29.4 up
+          docker run --rm --network host \
+            --env DATABASE_URL="postgresql://ledger:ledger_test_password@127.0.0.1:5432/ledger?sslmode=disable" \
+            --env DBMATE_MIGRATIONS_DIR=/db/migrations \
+            --env DBMATE_NO_DUMP_SCHEMA=true \
+            --volume "$GITHUB_WORKSPACE/db/migrations:/db/migrations:ro" \
+            ghcr.io/amacneil/dbmate:2.29.4 up
+
+      - name: Load development seeds twice
+        run: |
+          docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            --volume "$GITHUB_WORKSPACE/db/seeds:/seeds:ro" \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --file /seeds/001_phase0.sql
+          docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            --volume "$GITHUB_WORKSPACE/db/seeds:/seeds:ro" \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --file /seeds/001_phase0.sql
+
+      - name: Verify Phase 0 schema
+        run: |
+          table_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('institution','account','statement','category','merchant','txn','job','adapter','fx_rate');")"
+          test "$table_count" = "9"
+          vector_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from pg_extension where extname = 'vector';")"
+          test "$vector_count" = "1"
+          claim_token_type="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select data_type from information_schema.columns where table_schema = 'public' and table_name = 'job' and column_name = 'claim_token';")"
+          test "$claim_token_type" = "uuid"
+          source_key_constraint_count="$(docker run --rm --network host \
+            --env PGPASSWORD=ledger_test_password \
+            pgvector/pgvector:0.8.2-pg16-bookworm \
+            psql --host 127.0.0.1 --username ledger --dbname ledger \
+            --set ON_ERROR_STOP=1 --tuples-only --no-align \
+            --command "select count(*) from pg_constraint where conname = 'statement_account_source_file_unique';")"
+          test "$source_key_constraint_count" = "1"
+
+  containers:
+    name: Container stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - typescript
+      - python
+      - database
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          enable-cache: true
+          cache-dependency-glob: services/worker/uv.lock
+
+      - name: Start Phase 0 stack
+        run: docker compose up --build --detach
+
+      - name: Wait for healthy API
+        run: |
+          curl --fail --silent --show-error \
+            --retry 30 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:3000/api/health
+
+      - name: Run golden ingestion smoke test
+        run: make smoke
+
+      - name: Show service state on failure
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose logs --no-color --tail=200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

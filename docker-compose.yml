@@ -1,0 +1,199 @@
+name: ledger
+
+x-database-environment: &database-environment
+  DATABASE_URL: "${DATABASE_URL_DOCKER:-postgresql://ledger:ledger_dev_password@postgres:5432/ledger?sslmode=disable}"
+
+x-object-store-environment: &object-store-environment
+  S3_ACCESS_KEY: "${S3_ACCESS_KEY:-ledger_app}"
+  S3_SECRET_KEY: "${S3_SECRET_KEY:-ledger_minio_app_password}"
+  S3_BUCKET: "${S3_BUCKET:-ledger-statements}"
+  S3_REGION: "${S3_REGION:-us-east-1}"
+  S3_ENDPOINT: "${S3_ENDPOINT_DOCKER:-http://minio:9000}"
+  S3_FORCE_PATH_STYLE: "${S3_FORCE_PATH_STYLE:-true}"
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-ledger}"
+      POSTGRES_USER: "${POSTGRES_USER:-ledger}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-ledger_dev_password}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "${POSTGRES_USER:-ledger}" -d "${POSTGRES_DB:-ledger}"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.29.4
+    environment:
+      <<: *database-environment
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db/migrations:/db/migrations:ro
+    command:
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: "${POSTGRES_DB:-ledger}"
+      PGUSER: "${POSTGRES_USER:-ledger}"
+      PGPASSWORD: "${POSTGRES_PASSWORD:-ledger_dev_password}"
+    volumes:
+      - ./db/seeds:/seeds:ro
+    command:
+      - psql
+      - --set=ON_ERROR_STOP=1
+      - --file=/seeds/001_phase0.sql
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-ledger_admin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-ledger_minio_admin_password}"
+      MINIO_BROWSER_REDIRECT_URL: "http://localhost:${MINIO_CONSOLE_PORT:-9001}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://localhost:9000/minio/health/live
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |-
+        set -eu
+        mc alias set ledger http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "ledger/$${S3_BUCKET}"
+        mc admin user add ledger "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::%s/*"]}]}' "$${S3_BUCKET}" "$${S3_BUCKET}" > /tmp/ledger-policy.json
+        mc admin policy create ledger ledger-statements-access /tmp/ledger-policy.json
+        mc admin policy attach ledger ledger-statements-access --user "$${S3_ACCESS_KEY}"
+        mc anonymous set none "ledger/$${S3_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-ledger_admin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-ledger_minio_admin_password}"
+      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-ledger_app}"
+      S3_SECRET_KEY: "${S3_SECRET_KEY:-ledger_minio_app_password}"
+      S3_BUCKET: "${S3_BUCKET:-ledger-statements}"
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    environment:
+      <<:
+        - *database-environment
+        - *object-store-environment
+      BASE_CURRENCY: "${BASE_CURRENCY:-CAD}"
+      STATEMENT_ENCRYPTION_KEY: "${STATEMENT_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}"
+      WORKER_POLL_INTERVAL_SECONDS: "${WORKER_POLL_INTERVAL_SECONDS:-2}"
+      WORKER_JOB_TIMEOUT_SECONDS: "${WORKER_JOB_TIMEOUT_SECONDS:-900}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-anthropic}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL_CHEAP: "${ANTHROPIC_MODEL_CHEAP:-claude-3-5-haiku-latest}"
+      ANTHROPIC_MODEL_CAPABLE: "${ANTHROPIC_MODEL_CAPABLE:-claude-sonnet-4-0}"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import os; os.kill(1, 0)
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      <<:
+        - *database-environment
+        - *object-store-environment
+      HOST: 0.0.0.0
+      PORT: "3000"
+      ORIGIN: "${ORIGIN:-http://localhost:3000}"
+      DATABASE_POOL_SIZE: "${DATABASE_POOL_SIZE:-10}"
+      DATABASE_STATEMENT_TIMEOUT_MS: "${DATABASE_STATEMENT_TIMEOUT_MS:-10000}"
+      PUBLIC_BASE_CURRENCY: "${PUBLIC_BASE_CURRENCY:-CAD}"
+      BASE_CURRENCY: "${BASE_CURRENCY:-CAD}"
+      STATEMENT_ENCRYPTION_KEY: "${STATEMENT_ENCRYPTION_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}"
+      UPLOAD_MAX_FILES: "${UPLOAD_MAX_FILES:-10}"
+      UPLOAD_MAX_FILE_BYTES: "${UPLOAD_MAX_FILE_BYTES:-15728640}"
+      UPLOAD_MAX_TOTAL_BYTES: "${UPLOAD_MAX_TOTAL_BYTES:-41943040}"
+      BODY_SIZE_LIMIT: "${BODY_SIZE_LIMIT:-52428800}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
