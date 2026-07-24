@@ -23,6 +23,16 @@ describe('statementObjectKey', () => {
     expect(first.key).not.toContain('Private');
   });
 
+  it('preserves QFX format for worker adapter detection', () => {
+    const result = statementObjectKey({
+      accountId: 'account-a',
+      fileName: 'statement.qfx',
+      body: new TextEncoder().encode('<OFX></OFX>')
+    });
+    expect(result.format).toBe('qfx');
+    expect(result.key).toMatch(/\.qfx$/);
+  });
+
   it('changes across accounts and plaintext content', () => {
     const body = Buffer.from('statement');
     const first = statementObjectKey({ accountId: 'account-a', fileName: 'one.xlsx', body });

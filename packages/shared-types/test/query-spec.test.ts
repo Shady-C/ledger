@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { analyticsQuerySchema, transactionQuerySchema } from '../src/index.js';
+import { analyticsQuerySchema, jobQuerySchema, transactionQuerySchema } from '../src/index.js';
 
 describe('transactionQuerySchema', () => {
   it('applies bounded pagination defaults', () => {
@@ -40,5 +40,18 @@ describe('analyticsQuerySchema', () => {
         from: '2026-01-01'
       }).success
     ).toBe(true);
+  });
+});
+
+describe('jobQuerySchema', () => {
+  it('accepts typed job filters and bounds pagination', () => {
+    expect(jobQuerySchema.parse({ kind: 'categorize', status: 'failed', page: '2' })).toMatchObject({
+      kind: 'categorize',
+      status: 'failed',
+      page: 2,
+      pageSize: 25
+    });
+    expect(jobQuerySchema.safeParse({ kind: 'unknown' }).success).toBe(false);
+    expect(jobQuerySchema.safeParse({ pageSize: 101 }).success).toBe(false);
   });
 });

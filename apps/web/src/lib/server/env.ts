@@ -54,6 +54,20 @@ export function uploadLimits() {
   };
 }
 
+export function parseFxMaxStalenessDays(value: string | undefined): number {
+  const raw = value?.trim();
+  if (!raw) return 7;
+  const days = Number(raw);
+  if (!Number.isSafeInteger(days) || days < 0 || days > 7) {
+    throw new ConfigurationError('FX_MAX_STALENESS_DAYS', 'must be an integer from 0 through 7');
+  }
+  return days;
+}
+
+export function fxMaxStalenessDays(): number {
+  return parseFxMaxStalenessDays(process.env.FX_MAX_STALENESS_DAYS);
+}
+
 export function parseStatementEncryptionKey(value: string | undefined) {
   if (!value || !/^[0-9a-fA-F]{64}$/.test(value)) {
     throw new ConfigurationError('STATEMENT_ENCRYPTION_KEY', 'must be exactly 64 hexadecimal characters');

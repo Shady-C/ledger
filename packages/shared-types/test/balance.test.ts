@@ -5,11 +5,18 @@ import { accountSummarySchema, balanceResponseSchema } from '../src/index.js';
 const account = {
   id: 'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
   displayName: 'Amex Card',
+  institutionId: '3f93eac0-355b-4b19-89eb-c89812ffd043',
   institutionName: 'American Express',
   kind: 'credit_card',
   nativeCurrency: 'CAD',
   accountRefMasked: '••••1001',
   currentBalance: '129.30',
+  currentBalanceBase: '129.30',
+  baseCurrency: 'CAD',
+  creditLimit: '10000.00',
+  usedCredit: null,
+  availableCredit: null,
+  utilizationPercent: null,
   lastStatementDate: '2026-07-05'
 };
 

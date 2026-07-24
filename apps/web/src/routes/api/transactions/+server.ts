@@ -18,6 +18,8 @@ type TransactionRow = {
   merchant_name: string | null;
   category_id: string | null;
   category_name: string | null;
+  category_source: 'fallback' | 'rule' | 'ai' | 'user_merchant' | 'user_transaction';
+  category_confidence: string | null;
   amount_native: string;
   currency_native: string;
   amount_base: string;
@@ -26,6 +28,8 @@ type TransactionRow = {
   direction: 'debit' | 'credit' | 'payment' | 'fee' | 'refund' | 'interest';
   enrichment: Record<string, unknown> | null;
   running_balance: string;
+  running_balance_native: string;
+  running_balance_base: string | null;
 };
 type CountRow = { total: number };
 
@@ -52,6 +56,8 @@ export async function GET({ url }) {
           merchantName: row.merchant_name,
           categoryId: row.category_id,
           categoryName: row.category_name,
+          categorySource: row.category_source,
+          categoryConfidence: row.category_confidence,
           amountNative: row.amount_native,
           currencyNative: row.currency_native,
           amountBase: row.amount_base,
@@ -59,6 +65,8 @@ export async function GET({ url }) {
           fxRate: row.fx_rate,
           direction: row.direction,
           runningBalance: row.running_balance,
+          runningBalanceNative: row.running_balance_native,
+          runningBalanceBase: row.running_balance_base,
           enrichment: row.enrichment ?? {}
         })),
         page: parsed.data.page,

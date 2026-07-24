@@ -1,5 +1,10 @@
 import {
+  workerBaseCurrencyRebuildJobResultSchema,
+  workerCategorizeJobResultSchema,
+  workerFxRefreshJobResultSchema,
   workerIngestResultSchema,
+  type JobKind,
+  type JobResult,
   type IngestResult,
   type JobStatus,
   type WorkerIngestResult
@@ -39,7 +44,17 @@ function toPublicResult(result: WorkerIngestResult): IngestResult {
   };
 }
 
-export function mapJobResult(status: JobStatus, raw: unknown): IngestResult | null {
+export function mapJobResult(status: JobStatus, raw: unknown): IngestResult | null;
+export function mapJobResult(kind: JobKind, status: JobStatus, raw: unknown): JobResult | null;
+export function mapJobResult(
+  kindOrStatus: JobKind | JobStatus,
+  statusOrRaw: JobStatus | unknown,
+  optionalRaw?: unknown
+): JobResult | null {
+  const legacyCall = arguments.length === 2;
+  const kind: JobKind = legacyCall ? 'ingest' : (kindOrStatus as JobKind);
+  const status: JobStatus = legacyCall ? (kindOrStatus as JobStatus) : (statusOrRaw as JobStatus);
+  const raw = legacyCall ? statusOrRaw : optionalRaw;
   if (raw === null || raw === undefined) {
     if (status === 'done' || status === 'needs_ai') {
       throw new JobResultContractError(`A ${status} job must include a result.`);
@@ -47,9 +62,41 @@ export function mapJobResult(status: JobStatus, raw: unknown): IngestResult | nu
     return null;
   }
 
-  const parsed = workerIngestResultSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new JobResultContractError('The worker returned an invalid ingest result.');
+  if (kind === 'ingest') {
+    const parsed = workerIngestResultSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new JobResultContractError('The worker returned an invalid ingest result.');
+    }
+    return toPublicResult(parsed.data);
   }
-  return toPublicResult(parsed.data);
+
+  if (kind === 'categorize') {
+    const parsed = workerCategorizeJobResultSchema.safeParse(raw);
+    if (!parsed.success) throw new JobResultContractError('The worker returned an invalid categorization result.');
+    return {
+      scanned: parsed.data.scanned,
+      autoApplied: parsed.data.auto_applied,
+      proposalsCreated: parsed.data.proposals_created,
+      unchanged: parsed.data.unchanged
+    };
+  }
+
+  if (kind === 'fx_refresh') {
+    const parsed = workerFxRefreshJobResultSchema.safeParse(raw);
+    if (!parsed.success) throw new JobResultContractError('The worker returned an invalid FX refresh result.');
+    return {
+      baseCurrency: parsed.data.base_currency,
+      quoteCurrencies: parsed.data.quote_currencies,
+      ratesStored: parsed.data.rates_stored
+    };
+  }
+
+  const parsed = workerBaseCurrencyRebuildJobResultSchema.safeParse(raw);
+  if (!parsed.success) throw new JobResultContractError('The worker returned an invalid base-currency rebuild result.');
+  return {
+    previousBaseCurrency: parsed.data.previous_base_currency,
+    targetBaseCurrency: parsed.data.target_base_currency,
+    transactionsUpdated: parsed.data.transactions_updated,
+    settingsUpdated: parsed.data.settings_updated
+  };
 }

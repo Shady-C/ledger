@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { jobIdSchema, jobStatusSchema } from '@ledger/shared-types';
+import { jobIdSchema, jobKindSchema, jobStatusSchema } from '@ledger/shared-types';
 
 import { apiError, unavailableOrInternal } from '$lib/server/api.js';
 import { query } from '$lib/server/db.js';
@@ -7,11 +7,14 @@ import { JobResultContractError, mapJobResult } from '$lib/server/job-result.js'
 
 type JobRow = {
   id: string;
+  kind: string;
   status: string;
   created_at: Date;
   finished_at: Date | null;
   result: unknown;
   error: string | null;
+  retry_count: number;
+  max_retries: number;
 };
 
 export async function GET({ params }) {
@@ -20,7 +23,7 @@ export async function GET({ params }) {
 
   try {
     const result = await query<JobRow>(
-      `SELECT id, status, created_at, finished_at, result, error
+      `SELECT id, kind, status, created_at, finished_at, result, error, retry_count, max_retries
        FROM job
        WHERE id = $1::uuid`,
       [id.data]
@@ -28,15 +31,19 @@ export async function GET({ params }) {
     const row = result.rows[0];
     if (!row) return apiError(404, 'job_not_found', 'That import job was not found.');
 
-    const status = jobStatusSchema.safeParse(row.status);
-    if (!status.success) {
-      console.error('[job status] worker contract violation', { jobId: row.id, status: row.status });
+    const [kind, status] = [jobKindSchema.safeParse(row.kind), jobStatusSchema.safeParse(row.status)];
+    if (!kind.success || !status.success) {
+      console.error('[job status] worker contract violation', {
+        jobId: row.id,
+        kind: row.kind,
+        status: row.status
+      });
       return apiError(500, 'invalid_job_state', 'The import status could not be read.');
     }
 
     let mappedResult: ReturnType<typeof mapJobResult>;
     try {
-      mappedResult = mapJobResult(status.data, row.result);
+      mappedResult = mapJobResult(kind.data, status.data, row.result);
     } catch (error) {
       if (error instanceof JobResultContractError) {
         console.error('[job status] worker result contract violation', {
@@ -51,11 +58,14 @@ export async function GET({ params }) {
     return json(
       {
         id: row.id,
+        kind: kind.data,
         status: status.data,
         createdAt: row.created_at.toISOString(),
         finishedAt: row.finished_at?.toISOString() ?? null,
         result: mappedResult,
-        error: row.error ? 'The import could not be completed. Check the worker logs for details.' : null
+        retryCount: row.retry_count,
+        maxRetries: row.max_retries,
+        error: row.error ? 'The job could not be completed. Check the worker logs for details.' : null
       },
       { headers: { 'cache-control': 'no-store' } }
     );

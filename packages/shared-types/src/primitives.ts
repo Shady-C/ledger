@@ -21,6 +21,10 @@ export const currencyCodeSchema = z.string().regex(/^[A-Z]{3}$/, 'Expected an IS
 export const decimalStringSchema = z
   .string()
   .regex(/^-?\d+(?:\.\d+)?$/, 'Expected an exact decimal string');
+export const positiveDecimalStringSchema = decimalStringSchema.refine(
+  (value) => !value.startsWith('-') && /[1-9]/.test(value),
+  'Expected a positive decimal string'
+);
 
 export type CurrencyCode = z.infer<typeof currencyCodeSchema>;
 export type DecimalString = z.infer<typeof decimalStringSchema>;

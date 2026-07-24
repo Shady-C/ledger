@@ -42,7 +42,25 @@ export const transactionQuerySchema = z
     }
   });
 
-export const analyticsViewSchema = z.enum(['balance', 'cashflow']);
+export const analyticsViewSchema = z.enum(['balance', 'cashflow', 'net-worth', 'fx']);
+
+export const jobQuerySchema = z
+  .object({
+    kind: z.preprocess(
+      emptyStringToUndefined,
+      z.enum(['ingest', 'categorize', 'fx_refresh', 'base_currency_rebuild']).optional()
+    ),
+    status: z.preprocess(
+      emptyStringToUndefined,
+      z.enum(['queued', 'claimed', 'done', 'failed', 'needs_ai']).optional()
+    ),
+    page: z.preprocess(emptyStringToUndefined, z.coerce.number().int().min(1).default(1)),
+    pageSize: z.preprocess(
+      emptyStringToUndefined,
+      z.coerce.number().int().min(1).max(100).default(25)
+    )
+  })
+  .strict();
 
 export const analyticsQuerySchema = z
   .object({
@@ -65,3 +83,4 @@ export type AnalyticsQuery = z.infer<typeof analyticsQuerySchema>;
 export type AnalyticsView = z.infer<typeof analyticsViewSchema>;
 export type TransactionQuery = z.infer<typeof transactionQuerySchema>;
 export type TransactionSort = z.infer<typeof transactionSortSchema>;
+export type JobQuery = z.infer<typeof jobQuerySchema>;

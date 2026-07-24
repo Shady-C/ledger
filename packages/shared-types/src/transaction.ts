@@ -6,6 +6,7 @@ import {
   isoDateSchema,
   uuidSchema
 } from './primitives.js';
+import { categorySourceSchema } from './category.js';
 
 export const transactionDirectionSchema = z.enum([
   'debit',
@@ -38,6 +39,8 @@ export const transactionSchema = z.object({
   merchantName: z.string().nullable(),
   categoryId: uuidSchema.nullable(),
   categoryName: z.string().nullable(),
+  categorySource: categorySourceSchema,
+  categoryConfidence: decimalStringSchema.nullable(),
   amountNative: decimalStringSchema,
   currencyNative: currencyCodeSchema,
   amountBase: decimalStringSchema,
@@ -45,6 +48,8 @@ export const transactionSchema = z.object({
   fxRate: decimalStringSchema,
   direction: transactionDirectionSchema,
   runningBalance: decimalStringSchema,
+  runningBalanceNative: decimalStringSchema,
+  runningBalanceBase: decimalStringSchema.nullable(),
   enrichment: transactionEnrichmentSchema
 });
 
@@ -56,6 +61,26 @@ export const transactionPageSchema = z.object({
   totalPages: z.number().int().nonnegative()
 });
 
+export const transactionCategoryPatchSchema = z
+  .object({
+    categoryId: uuidSchema,
+    applyToMerchant: z.boolean().default(false)
+  })
+  .strict();
+
+export const transactionCategoryUpdateResponseSchema = z.object({
+  transaction: z.object({
+    id: uuidSchema,
+    categoryId: uuidSchema,
+    categoryName: z.string().min(1),
+    categorySource: categorySourceSchema,
+    categoryConfidence: decimalStringSchema
+  }),
+  merchantTransactionsUpdated: z.number().int().nonnegative()
+});
+
 export type Transaction = z.infer<typeof transactionSchema>;
 export type TransactionDirection = z.infer<typeof transactionDirectionSchema>;
 export type TransactionPage = z.infer<typeof transactionPageSchema>;
+export type TransactionCategoryPatch = z.infer<typeof transactionCategoryPatchSchema>;
+export type TransactionCategoryUpdateResponse = z.infer<typeof transactionCategoryUpdateResponseSchema>;

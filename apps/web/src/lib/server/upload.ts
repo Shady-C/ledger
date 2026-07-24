@@ -1,6 +1,6 @@
 import { uploadLimits } from './env.js';
 
-const allowedExtensions = new Set(['csv', 'xlsx', 'pdf']);
+const allowedExtensions = new Set(['csv', 'xlsx', 'pdf', 'ofx', 'qfx']);
 
 export type CheckedUpload = {
   name: string;
@@ -19,6 +19,12 @@ function validSignature(ext: string, bytes: Uint8Array) {
   if (ext === 'xlsx') return beginsWith(bytes, [0x50, 0x4b]);
   if (ext === 'pdf') return beginsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d]);
   if (ext === 'csv') return !bytes.subarray(0, Math.min(bytes.length, 8192)).includes(0);
+  if (ext === 'ofx' || ext === 'qfx') {
+    const prefix = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 8192))).trimStart();
+    const upper = prefix.toUpperCase();
+    return !bytes.subarray(0, Math.min(bytes.length, 8192)).includes(0)
+      && (upper.startsWith('OFXHEADER:') || upper.startsWith('<?XML') || upper.startsWith('<OFX'));
+  }
   return false;
 }
 
@@ -43,7 +49,7 @@ export async function checkUploads(values: FormDataEntryValue[]): Promise<
   for (const file of incoming) {
     const ext = extension(file.name);
     if (!allowedExtensions.has(ext)) {
-      return { ok: false, message: 'Only CSV, XLSX, and PDF statements are supported.' };
+      return { ok: false, message: 'Only CSV, XLSX, PDF, OFX, and QFX statements are supported.' };
     }
     const body = new Uint8Array(await file.arrayBuffer());
     if (!validSignature(ext, body)) {

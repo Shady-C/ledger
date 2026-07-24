@@ -45,4 +45,26 @@ describe('mapJobResult', () => {
   it('rejects malformed non-null results for every status', () => {
     expect(() => mapJobResult('failed', { added: -1 })).toThrow(JobResultContractError);
   });
+
+  it('maps typed categorization results without treating them as ingest results', () => {
+    expect(
+      mapJobResult('categorize', 'done', {
+        scanned: 8,
+        auto_applied: 5,
+        proposals_created: 2,
+        unchanged: 1
+      })
+    ).toEqual({ scanned: 8, autoApplied: 5, proposalsCreated: 2, unchanged: 1 });
+  });
+
+  it('rejects a result whose payload does not match its job kind', () => {
+    expect(() =>
+      mapJobResult('base_currency_rebuild', 'done', {
+        scanned: 1,
+        auto_applied: 1,
+        proposals_created: 0,
+        unchanged: 0
+      })
+    ).toThrow(JobResultContractError);
+  });
 });

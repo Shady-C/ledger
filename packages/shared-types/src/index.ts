@@ -3,6 +3,8 @@ export * from './analytics.js';
 export * from './api.js';
 export * from './category.js';
 export * from './job.js';
+export * from './institution.js';
 export * from './primitives.js';
 export * from './query-spec.js';
 export * from './transaction.js';
+export * from './settings.js';

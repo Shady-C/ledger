@@ -32,6 +32,10 @@ SET institution_id = EXCLUDED.institution_id,
     native_currency = EXCLUDED.native_currency,
     updated_at = now();
 
+INSERT INTO ledger_settings (singleton, base_currency)
+VALUES (true, 'CAD')
+ON CONFLICT (singleton) DO NOTHING;
+
 INSERT INTO category (id, parent_id, name, kind)
 VALUES
     ('00000000-0000-4000-8000-00000000c001', NULL, 'Other', 'spend'),
@@ -54,6 +58,11 @@ SET parent_id = EXCLUDED.parent_id,
     name = EXCLUDED.name,
     kind = EXCLUDED.kind,
     updated_at = now();
+
+UPDATE category
+SET is_protected = true,
+    updated_at = now()
+WHERE id = '00000000-0000-4000-8000-00000000c001';
 
 INSERT INTO adapter (
     id,

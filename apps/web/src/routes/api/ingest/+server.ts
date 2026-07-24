@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { uuidSchema } from '@ledger/shared-types';
+import { createHash } from 'node:crypto';
 
 import { apiError, unavailableOrInternal } from '$lib/server/api.js';
 import { query } from '$lib/server/db.js';
@@ -46,11 +47,25 @@ export async function POST({ request }) {
       if (!uploadedKeys.includes(stored.key)) uploadedKeys.push(stored.key);
     }
 
+    const deduplicationKey = `ingest:${createHash('sha256')
+      .update(account.data)
+      .update('\0')
+      .update([...uploadedKeys].sort().join('\0'))
+      .digest('hex')}`;
     const result = await query<JobRow>(
-      `INSERT INTO job (kind, payload, status)
-       VALUES ('ingest', jsonb_build_object('file_keys', $1::text[], 'account_id', $2::uuid), 'queued')
+      `INSERT INTO job (kind, payload, status, deduplication_key)
+       VALUES (
+         'ingest',
+         jsonb_build_object('file_keys', $1::text[], 'account_id', $2::uuid),
+         'queued',
+         $3
+       )
+       ON CONFLICT (kind, deduplication_key)
+         WHERE deduplication_key IS NOT NULL
+           AND status IN ('queued', 'claimed')
+       DO UPDATE SET updated_at = job.updated_at
        RETURNING id`,
-      [uploadedKeys, account.data]
+      [uploadedKeys, account.data, deduplicationKey]
     );
     const job = result.rows[0];
     if (!job) throw new Error('Job insert did not return an id');

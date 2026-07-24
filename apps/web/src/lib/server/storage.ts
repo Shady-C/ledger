@@ -55,7 +55,7 @@ async function ensureBucket() {
 
 function sourceFormat(name: string) {
   const extension = name.toLowerCase().split('.').pop();
-  if (!extension || !['csv', 'xlsx', 'pdf'].includes(extension)) {
+  if (!extension || !['csv', 'xlsx', 'pdf', 'ofx', 'qfx'].includes(extension)) {
     throw new Error('Unsupported statement format.');
   }
   return extension;
