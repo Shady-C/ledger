@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ghostscript libgl1 \
+    && apt-get install --yes --no-install-recommends ghostscript libgl1 tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 COPY services/worker/pyproject.toml services/worker/uv.lock services/worker/README.md ./

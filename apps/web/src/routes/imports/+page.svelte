@@ -65,7 +65,7 @@
 
 <svelte:head>
   <title>Imports · Ledger</title>
-  <meta name="description" content="Import and reconcile CSV, XLSX, OFX/QFX, and deterministic PDF statements." />
+  <meta name="description" content="Import and reconcile CSV, XLSX, OFX/QFX, and supported deterministic PDF statements." />
 </svelte:head>
 
 <div class="page">
@@ -90,7 +90,7 @@
   <section class="format-notes" aria-label="Supported import formats">
     <article><span>CSV / XLSX</span><strong>Known or safely mapped</strong><p>Unknown columns use headers and up to five redacted rows; reconciliation still decides whether persistence is allowed.</p></article>
     <article><span>OFX / QFX</span><strong>Bank and card statements</strong><p>FITID preserves transaction identity. Investment statements remain unsupported.</p></article>
-    <article><span>PDF</span><strong>Deterministic tables only</strong><p>Irregular PDF AI extraction remains outside Phase 1.</p></article>
+    <article><span>PDF</span><strong>Known layouts, checked exactly</strong><p>I&amp;M Tanzania TZS image statements use local OCR with running-balance, totals, and closing-balance verification. Unknown PDF AI extraction remains unsupported.</p></article>
   </section>
 
   <ImportHistory {jobs} loading={historyLoading} onRefresh={loadHistory} />

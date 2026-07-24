@@ -120,7 +120,7 @@
   <div class="copy">
     <p class="eyebrow">Statement inbox</p>
     <h2 id="upload-title">Turn statements into an auditable ledger.</h2>
-    <p class="support">CSV, XLSX, OFX/QFX, or deterministic PDF. Repeat uploads are safely skipped.</p>
+    <p class="support">CSV, XLSX, OFX/QFX, or a supported deterministic PDF such as I&amp;M Tanzania TZS. Repeat uploads are safely skipped.</p>
   </div>
 
   <form on:submit|preventDefault={upload}>

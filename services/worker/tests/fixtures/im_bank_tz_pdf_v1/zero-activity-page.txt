@@ -1,0 +1,15 @@
+SANITIZED CUSTOMER
+CUSTOMER DETAILS REDACTED
+TANZANIA MAIN BRANCH
+Account Name SANITIZED CUSTOMER Page 1 of 1
+Account Number XXXX0001
+Account Type SB - SALARY TWENZETU DUBAI -
+Account Currency TANZANIAN SHILLING Statement Period 10-03-2026 To 31-03-2026
+Value Ref Transaction
+Tran Date Date No Withdrawls Deposits Balance Narrative
+10-03-26 571,730.82CR B/F
+Totals
+Balance as of 31-03-2026 571,730.82 CR
+Cleared Balance as on 10-04-2026 571,730.82 CR
+Unclear Balance as on 10-04-2026 0.00 CR
+© 2015 I&M Bank Electronic Messaging System. All rights reserved.

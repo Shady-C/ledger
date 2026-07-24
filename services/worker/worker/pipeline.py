@@ -16,6 +16,7 @@ from worker.adapters import (
     AmexXlsxAdapter,
     GenericCsvAdapter,
     GenericXlsxAdapter,
+    ImBankTanzaniaPdfV1Adapter,
     OfxAdapter,
     PdfTableAdapter,
 )
@@ -57,6 +58,7 @@ class AdapterRegistry:
                 AmexXlsxAdapter(),
                 GenericCsvAdapter(),
                 GenericXlsxAdapter(),
+                ImBankTanzaniaPdfV1Adapter(),
                 PdfTableAdapter(),
             )
         )
@@ -140,7 +142,7 @@ class IngestionPipeline:
 
         currencies = {row.currency_native for row in parsed.rows}
         if (
-            currencies != {account.native_currency}
+            (currencies and currencies != {account.native_currency})
             or parsed.statement.currency != account.native_currency
         ):
             raise AdapterError("statement currency does not match the selected account")
