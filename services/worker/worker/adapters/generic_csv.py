@@ -151,6 +151,10 @@ class GenericCsvAdapter:
             )
         if not parsed:
             raise AdapterError("CSV contains no transaction rows")
+        row_currencies = {row.currency_native for row in parsed}
+        if len(row_currencies) != 1:
+            raise AdapterError("CSV mixes multiple native currencies")
+        metadata = metadata.model_copy(update={"currency": next(iter(row_currencies))})
         metadata = metadata_with_row_dates(metadata, [row.booked_date for row in parsed])
         return ParseResult(adapter=self.name, rows=tuple(parsed), statement=metadata)
 

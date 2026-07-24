@@ -1,4 +1,4 @@
-"""Config-driven Anthropic implementation, not instantiated by Phase 0."""
+"""Config-driven Anthropic structured-output implementation."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ import json
 import os
 from typing import Any
 
-from worker.llm.provider import Message, ModelTier
+from worker.llm.provider import LLMResponseError, Message, ModelTier
 
 
 class AnthropicProvider:
+    provider_name = "anthropic"
+
     def __init__(
         self,
         *,
@@ -25,10 +27,15 @@ class AnthropicProvider:
         except ImportError as exc:
             raise RuntimeError("install ledger-worker[llm] to use Anthropic") from exc
         self._client: Any = anthropic.Anthropic(api_key=key)
-        self._models = {
-            "cheap": cheap_model or os.getenv("ANTHROPIC_MODEL_CHEAP", "claude-3-5-haiku-latest"),
-            "capable": capable_model or os.getenv("ANTHROPIC_MODEL_CAPABLE", "claude-sonnet-4-0"),
+        self._models: dict[ModelTier, str] = {
+            "cheap": cheap_model
+            or os.getenv("ANTHROPIC_MODEL_CHEAP")
+            or "claude-haiku-4-5-20251001",
+            "capable": capable_model or os.getenv("ANTHROPIC_MODEL_CAPABLE") or "claude-sonnet-5",
         }
+
+    def model_name(self, model_tier: ModelTier) -> str:
+        return self._models[model_tier]
 
     def complete(
         self,
@@ -38,17 +45,29 @@ class AnthropicProvider:
         schema: dict[str, object] | None = None,
         model_tier: ModelTier,
     ) -> dict[str, object]:
-        system_prompt = system
+        request: dict[str, Any] = {
+            "model": self._models[model_tier],
+            "max_tokens": 4096,
+            "system": system,
+            "messages": messages,
+        }
         if schema is not None:
-            system_prompt += "\nReturn only JSON matching this schema:\n" + json.dumps(schema)
+            request["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
         response = self._client.messages.create(
-            model=self._models[model_tier],
-            max_tokens=4096,
-            system=system_prompt,
-            messages=messages,
+            **request,
         )
+        stop_reason = str(response.stop_reason or "")
+        if stop_reason == "refusal":
+            raise LLMResponseError("Anthropic refused the structured-output request")
+        if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+            raise LLMResponseError("Anthropic structured output was truncated")
+        if stop_reason not in {"end_turn", "stop_sequence"}:
+            raise LLMResponseError(f"Anthropic returned unexpected stop reason: {stop_reason}")
         text = "".join(block.text for block in response.content if block.type == "text")
-        value = json.loads(text)
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise LLMResponseError("Anthropic returned invalid JSON") from exc
         if not isinstance(value, dict):
-            raise ValueError("provider response must be a JSON object")
+            raise LLMResponseError("provider response must be a JSON object")
         return value

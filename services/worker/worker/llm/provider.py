@@ -14,6 +14,10 @@ ModelTier = Literal["cheap", "capable"]
 
 
 class LLMProvider(Protocol):
+    provider_name: str
+
+    def model_name(self, model_tier: ModelTier) -> str: ...
+
     def complete(
         self,
         *,
@@ -26,6 +30,10 @@ class LLMProvider(Protocol):
 
 class LLMDisabledError(RuntimeError):
     pass
+
+
+class LLMResponseError(RuntimeError):
+    """The provider completed a call without a usable structured response."""
 
 
 class DisabledLLMProvider:
@@ -41,3 +49,8 @@ class DisabledLLMProvider:
     ) -> dict[str, object]:
         del system, messages, schema, model_tier
         raise LLMDisabledError("LLM calls are disabled in Phase 0")
+
+    provider_name = "disabled"
+
+    def model_name(self, model_tier: ModelTier) -> str:
+        return f"disabled-{model_tier}"

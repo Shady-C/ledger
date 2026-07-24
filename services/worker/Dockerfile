@@ -17,10 +17,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY services/worker/pyproject.toml services/worker/uv.lock services/worker/README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra llm --no-install-project
 
 COPY services/worker/worker ./worker
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --extra llm --no-editable
 
 RUN addgroup --system ledger && adduser --system --ingroup ledger ledger
 USER ledger

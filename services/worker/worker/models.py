@@ -29,6 +29,22 @@ class ParseStatus(StrEnum):
     NEEDS_AI = "needs_ai"
 
 
+class CategorySource(StrEnum):
+    FALLBACK = "fallback"
+    RULE = "rule"
+    AI = "ai"
+    USER_MERCHANT = "user_merchant"
+    USER_TRANSACTION = "user_transaction"
+
+
+class FlowType(StrEnum):
+    SPEND = "spend"
+    INCOME = "income"
+    TRANSFER = "transfer"
+    REFUND = "refund"
+    FEE = "fee"
+
+
 class AccountKind(StrEnum):
     CREDIT_CARD = "credit_card"
     CHEQUING = "chequing"
@@ -128,6 +144,8 @@ class CanonicalTransaction(ParsedTransaction):
     category_name: str
     category_kind: str
     dedup_hash: str
+    category_source: CategorySource = CategorySource.FALLBACK
+    category_confidence: float | None = Field(default=0, ge=0, le=1)
 
 
 class FileIngestResult(BaseModel):

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 
-from worker.llm.provider import DisabledLLMProvider, LLMDisabledError
+from worker.llm.anthropic import AnthropicProvider
+from worker.llm.provider import DisabledLLMProvider, LLMDisabledError, LLMResponseError
 from worker.models import ParseResult, ParseStatus, StatementMetadata
 from worker.pipeline import AdapterRegistry, IngestionPipeline, JobRunner
 from worker.repository import InMemoryRepository, Job
@@ -69,3 +74,65 @@ def test_needs_ai_is_a_stable_job_result_and_does_not_invoke_llm() -> None:
             "reason": "synthetic irregular layout",
         }
     ]
+
+
+class _Messages:
+    def __init__(self, *, stop_reason: str = "end_turn", text: str = '{"ok":true}') -> None:
+        self.stop_reason = stop_reason
+        self.text = text
+        self.request: dict[str, Any] | None = None
+
+    def create(self, **request: Any) -> object:
+        self.request = request
+        return SimpleNamespace(
+            stop_reason=self.stop_reason,
+            content=[SimpleNamespace(type="text", text=self.text)],
+        )
+
+
+def test_anthropic_uses_native_structured_outputs_and_pinned_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages = _Messages()
+    client = SimpleNamespace(messages=messages)
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **_kw: client))
+    monkeypatch.delenv("ANTHROPIC_MODEL_CHEAP", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL_CAPABLE", raising=False)
+    provider = AnthropicProvider(api_key="test")
+
+    result = provider.complete(
+        system="structured",
+        messages=[{"role": "user", "content": "safe"}],
+        schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        model_tier="cheap",
+    )
+
+    assert result == {"ok": True}
+    assert provider.model_name("cheap") == "claude-haiku-4-5-20251001"
+    assert provider.model_name("capable") == "claude-sonnet-5"
+    assert messages.request is not None
+    assert messages.request["output_config"] == {
+        "format": {
+            "type": "json_schema",
+            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        }
+    }
+    assert "Return only JSON" not in messages.request["system"]
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+def test_anthropic_rejects_refusal_or_truncated_structured_output(
+    monkeypatch: pytest.MonkeyPatch, stop_reason: str
+) -> None:
+    messages = _Messages(stop_reason=stop_reason, text="not schema JSON")
+    client = SimpleNamespace(messages=messages)
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **_kw: client))
+    provider = AnthropicProvider(api_key="test")
+
+    with pytest.raises(LLMResponseError):
+        provider.complete(
+            system="structured",
+            messages=[{"role": "user", "content": "safe"}],
+            schema={"type": "object"},
+            model_tier="cheap",
+        )

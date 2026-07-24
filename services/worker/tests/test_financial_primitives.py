@@ -10,7 +10,14 @@ from worker.adapters.base import parse_decimal
 from worker.categorize import categorize
 from worker.dedup import transaction_dedup_hash
 from worker.fx import MissingFXRateError, RateQuote, StaticFXRateProvider, stamp_fx
-from worker.models import Direction, ParsedTransaction, StatementMetadata
+from worker.models import (
+    AccountKind,
+    CategorySource,
+    Direction,
+    FlowType,
+    ParsedTransaction,
+    StatementMetadata,
+)
 from worker.reconcile import StatementPeriod, coverage_gaps, reconcile_statement
 
 
@@ -36,7 +43,7 @@ def test_cad_fx_is_exact_identity_and_never_requires_provider() -> None:
     assert stamp.source == "identity"
 
 
-def test_non_cad_uses_explicit_dated_rate_and_bankers_rounding() -> None:
+def test_non_cad_uses_explicit_dated_rate() -> None:
     booked = date(2026, 1, 2)
     row = transaction(currency_native="USD", amount_native=Decimal("10.01"))
     provider = StaticFXRateProvider(
@@ -48,6 +55,42 @@ def test_non_cad_uses_explicit_dated_rate_and_bankers_rounding() -> None:
     assert stamp.amount_base == Decimal("14.01")
     assert stamp.rate == Decimal("1.4")
     assert stamp.source == "seed"
+
+
+@pytest.mark.parametrize(
+    ("amount", "expected"),
+    [(Decimal("1.00"), Decimal("1.01")), (Decimal("-1.00"), Decimal("-1.01"))],
+)
+def test_fx_half_cent_rounds_away_from_zero_like_postgres(
+    amount: Decimal, expected: Decimal
+) -> None:
+    booked = date(2026, 1, 2)
+    provider = StaticFXRateProvider(
+        {("USD", "CAD", booked): RateQuote(Decimal("1.005"), booked, "seed")}
+    )
+
+    stamp = stamp_fx(
+        transaction(currency_native="USD", amount_native=amount),
+        provider=provider,
+    )
+
+    assert stamp.amount_base == expected
+    assert stamp.rate == Decimal("1.00500000")
+
+
+def test_fx_rate_normalizes_to_db_scale_before_high_magnitude_conversion() -> None:
+    booked = date(2026, 1, 2)
+    provider = StaticFXRateProvider(
+        {("TZS", "CAD", booked): RateQuote(Decimal("0.000541235"), booked, "seed")}
+    )
+
+    stamp = stamp_fx(
+        transaction(currency_native="TZS", amount_native=Decimal("1000000.00")),
+        provider=provider,
+    )
+
+    assert stamp.rate == Decimal("0.00054124")
+    assert stamp.amount_base == Decimal("541.24")
 
 
 def test_native_money_rejects_rounding_and_normalizes_trailing_zeros() -> None:
@@ -131,4 +174,33 @@ def test_category_rules_and_unknown_review_flag_source() -> None:
         "Other",
         0.0,
         None,
+    )
+
+
+def test_asset_credits_do_not_fall_into_credit_card_payments() -> None:
+    asset_credit = categorize(
+        transaction(
+            description_raw="Synthetic Payroll Deposit",
+            amount_native=Decimal("1000"),
+            direction=Direction.CREDIT,
+        ),
+        account_kind=AccountKind.CHEQUING,
+    )
+    asset_payment_text = categorize(
+        transaction(
+            description_raw="Incoming Payment",
+            amount_native=Decimal("100"),
+            direction=Direction.CREDIT,
+        ),
+        account_kind=AccountKind.SAVINGS,
+    )
+
+    assert (
+        asset_credit.category_name,
+        asset_credit.flow_type,
+        asset_credit.source,
+    ) == ("Income", FlowType.INCOME, CategorySource.RULE)
+    assert (asset_payment_text.category_name, asset_payment_text.flow_type) == (
+        "Transfers",
+        FlowType.TRANSFER,
     )

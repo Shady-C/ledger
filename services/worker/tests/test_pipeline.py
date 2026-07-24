@@ -8,7 +8,9 @@ from io import BytesIO
 import pytest
 from openpyxl import load_workbook
 
-from worker.models import AccountKind
+from worker.ai_categorization import CategoryOption
+from worker.fx import RateQuote, StaticFXRateProvider
+from worker.models import AccountKind, CategorySource, FlowType
 from worker.pipeline import IngestionPipeline, JobRunner
 from worker.repository import InMemoryRepository, Job
 from worker.storage import MemoryObjectStore
@@ -143,9 +145,7 @@ def test_same_source_reimport_refreshes_summary_metadata_without_duplicate_trans
     workbook = load_workbook(BytesIO(corrected))
     del workbook["Transaction Summary"]
     detail = workbook["Transaction Details"]
-    processed_column = next(
-        cell.column for cell in detail[7] if cell.value == "Date Processed"
-    )
+    processed_column = next(cell.column for cell in detail[7] if cell.value == "Date Processed")
     for row_index in range(8, detail.max_row + 1):
         detail.cell(row=row_index, column=processed_column).value = None
     incomplete_output = BytesIO()
@@ -259,7 +259,11 @@ def test_job_runner_claims_processes_and_completes_an_ingest_job(
             )
         ]
     )
-    pipeline = IngestionPipeline(store=MemoryObjectStore(objects), repository=repository)
+    pipeline = IngestionPipeline(
+        store=MemoryObjectStore(objects),
+        repository=repository,
+        auto_enqueue_fx_refresh=False,
+    )
     runner = JobRunner(jobs=repository, pipeline=pipeline)
 
     assert runner.run_once() is True
@@ -277,6 +281,136 @@ def test_job_runner_records_invalid_payload_as_failed() -> None:
     assert JobRunner(jobs=repository, pipeline=pipeline).run_once() is True
 
     assert repository.failed["job-2"] == "invalid ingest job payload"
+
+
+def test_non_base_import_enqueues_deduplicated_fx_refresh_after_persistence() -> None:
+    booked = date(2026, 1, 13)
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Reference\n"
+        b"2026-01-13,Synthetic Purchase,10.00,,USD,USD-1\n"
+    )
+    repository = InMemoryRepository(
+        account_kinds={"usd": AccountKind.CHEQUING},
+        account_currencies={"usd": "USD"},
+    )
+    pipeline = IngestionPipeline(
+        store=MemoryObjectStore({"usd.csv": content}),
+        repository=repository,
+        fx_provider=StaticFXRateProvider(
+            {("USD", "CAD", booked): RateQuote(Decimal("1.35"), booked, "test")}
+        ),
+    )
+
+    first = pipeline.process_file(account_id="usd", file_key="usd.csv")
+    second = pipeline.process_file(account_id="usd", file_key="usd.csv")
+
+    assert (first.added, second.added) == (1, 0)
+    assert [(job.kind, job.payload) for job in repository.jobs] == [
+        ("fx_refresh", {"target_base_currency": "CAD"})
+    ]
+
+
+class _FailingFxQueueRepository(InMemoryRepository):
+    def enqueue_fx_refresh_job(self, *, target_base_currency: str) -> None:
+        del target_base_currency
+        raise RuntimeError("queue unavailable")
+
+
+def test_fx_queue_failure_does_not_rollback_reconciled_import() -> None:
+    booked = date(2026, 1, 13)
+    content = (
+        b"Date,Description,Debit,Credit,Currency,Reference\n"
+        b"2026-01-13,Synthetic Purchase,10.00,,USD,USD-2\n"
+    )
+    repository = _FailingFxQueueRepository(
+        account_kinds={"usd": AccountKind.CHEQUING},
+        account_currencies={"usd": "USD"},
+    )
+    pipeline = IngestionPipeline(
+        store=MemoryObjectStore({"usd.csv": content}),
+        repository=repository,
+        fx_provider=StaticFXRateProvider(
+            {("USD", "CAD", booked): RateQuote(Decimal("1.35"), booked, "test")}
+        ),
+    )
+
+    result = pipeline.process_file(account_id="usd", file_key="usd.csv")
+
+    assert result.added == 1
+    assert len(repository.transactions) == 1
+
+
+def test_future_imports_apply_user_mapping_and_ai_only_to_fallback() -> None:
+    user_repository = InMemoryRepository()
+    user_repository.merchant_category_mappings[("synthetic grocery market", FlowType.SPEND)] = (
+        CategoryOption("travel-id", "Travel", "spend"),
+        CategorySource.USER_MERCHANT,
+        None,
+    )
+    ai_repository = InMemoryRepository()
+    ai_repository.merchant_category_mappings[("novel vendor", FlowType.SPEND)] = (
+        CategoryOption("dining-id", "Dining", "spend"),
+        CategorySource.AI,
+        0.97,
+    )
+    ai_repository.merchant_category_mappings[("synthetic grocery market", FlowType.SPEND)] = (
+        CategoryOption("dining-id", "Dining", "spend"),
+        CategorySource.AI,
+        0.97,
+    )
+    content = {
+        "rules.csv": (
+            b"Date,Description,Amount,Currency,Reference\n"
+            b"2026-01-13,Synthetic Grocery Market,12.00,CAD,RULE-1\n"
+        ),
+        "novel.csv": (
+            b"Date,Description,Amount,Currency,Reference\n"
+            b"2026-01-14,Novel Vendor,15.00,CAD,NOVEL-1\n"
+        ),
+    }
+
+    IngestionPipeline(store=MemoryObjectStore(content), repository=user_repository).process_file(
+        account_id="card", file_key="rules.csv"
+    )
+    user_row = next(iter(user_repository.transactions.values()))
+
+    ai_pipeline = IngestionPipeline(store=MemoryObjectStore(content), repository=ai_repository)
+    ai_pipeline.process_file(account_id="card", file_key="rules.csv")
+    ai_pipeline.process_file(account_id="card", file_key="novel.csv")
+    ai_rows = {row.merchant_key: row for row in ai_repository.transactions.values()}
+
+    assert (user_row.category_name, user_row.category_source) == (
+        "Travel",
+        CategorySource.USER_MERCHANT,
+    )
+    assert (ai_rows["novel vendor"].category_name, ai_rows["novel vendor"].category_source) == (
+        "Dining",
+        CategorySource.AI,
+    )
+    assert (
+        ai_rows["synthetic grocery market"].category_name,
+        ai_rows["synthetic grocery market"].category_source,
+    ) == ("Groceries", CategorySource.RULE)
+
+
+def test_future_import_ignores_kind_incompatible_learned_mapping() -> None:
+    repository = InMemoryRepository()
+    repository.merchant_category_mappings[("novel vendor", FlowType.SPEND)] = (
+        CategoryOption("income-id", "Income", "income"),
+        CategorySource.USER_MERCHANT,
+        None,
+    )
+    content = (
+        b"Date,Description,Amount,Currency,Reference\n"
+        b"2026-01-14,Novel Vendor,15.00,CAD,NOVEL-BAD-KIND\n"
+    )
+
+    IngestionPipeline(
+        store=MemoryObjectStore({"novel.csv": content}), repository=repository
+    ).process_file(account_id="card", file_key="novel.csv")
+
+    row = next(iter(repository.transactions.values()))
+    assert (row.category_name, row.category_source) == ("Other", CategorySource.FALLBACK)
 
 
 def test_gap_is_surfaced_and_cleared_when_missing_statement_arrives_out_of_order(
