@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { AccountSummary } from '@ledger/shared-types';
   import { accountKind, money } from '$lib/format.js';
+  import type { AccountView } from './phase1-types.js';
+  import UtilizationMeter from './UtilizationMeter.svelte';
 
-  export let accounts: AccountSummary[] = [];
+  export let accounts: AccountView[] = [];
   export let loading = false;
   export let selected = '';
   export let onSelect: (id: string) => void = () => undefined;
@@ -45,6 +46,17 @@
             {account.displayName}{account.accountRefMasked ? ` · ${account.accountRefMasked}` : ''}
             · {account.balanceBasis === 'net_activity' ? 'Net activity' : 'Current balance'}
           </span>
+          {#if account.kind === 'credit_card'}
+            <UtilizationMeter
+              compact
+              label={`${account.displayName} utilization`}
+              value={account.utilizationPercent}
+              used={account.usedCredit}
+              limit={account.creditLimit}
+              available={account.availableCredit}
+              currency={account.nativeCurrency}
+            />
+          {/if}
         </button>
       {/each}
     </div>
@@ -112,6 +124,7 @@
     align-items: flex-start;
     justify-content: space-between;
     min-width: 220px;
+    gap: 0.7rem;
     padding: 1rem;
     color: var(--ink);
     text-align: left;
@@ -147,6 +160,8 @@
     font-size: 1.28rem;
     letter-spacing: -0.04em;
   }
+
+  button :global(.utilization) { width: 100%; }
 
   .skeleton {
     min-width: 220px;

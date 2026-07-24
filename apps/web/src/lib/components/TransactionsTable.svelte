@@ -1,33 +1,35 @@
 <script lang="ts">
-  import type {
-    AccountSummary,
-    CategorySummary,
-    TransactionPage,
-    TransactionSort
-  } from '@ledger/shared-types';
+  import type { TransactionSort } from '@ledger/shared-types';
   import { money, shortDate } from '$lib/format.js';
+  import CategoryCell from './CategoryCell.svelte';
+  import type { AccountView, CategoryView, TransactionPageView } from './phase1-types.js';
 
-  export let data: TransactionPage = { items: [], page: 1, pageSize: 25, total: 0, totalPages: 0 };
-  export let accounts: AccountSummary[] = [];
-  export let categories: CategorySummary[] = [];
+  export let data: TransactionPageView = { items: [], page: 1, pageSize: 25, total: 0, totalPages: 0 };
+  export let accounts: AccountView[] = [];
+  export let categories: CategoryView[] = [];
   export let loading = false;
   export let search = '';
   export let accountId = '';
   export let categoryId = '';
   export let direction = '';
+  export let from = '';
+  export let to = '';
   export let sort: TransactionSort = 'booked_date_desc';
   export let onFilter: (filters: {
     search: string;
     accountId: string;
     categoryId: string;
     direction: string;
+    from: string;
+    to: string;
     sort: TransactionSort;
   }) => void = () => undefined;
   export let onPage: (page: number) => void = () => undefined;
   export let onPageSize: (pageSize: number) => void = () => undefined;
+  export let onCategorySave: (transactionId: string, categoryId: string, applyToMerchant: boolean) => Promise<void> = async () => undefined;
 
   function submit() {
-    onFilter({ search, accountId, categoryId, direction, sort });
+    onFilter({ search, accountId, categoryId, direction, from, to, sort });
   }
 </script>
 
@@ -76,6 +78,14 @@
         {/each}
       </select>
     </label>
+    <label class="date-filter">
+      <span>From</span>
+      <input bind:value={from} type="date" on:change={submit} />
+    </label>
+    <label class="date-filter">
+      <span>To</span>
+      <input bind:value={to} type="date" on:change={submit} />
+    </label>
     <label>
       <span class="sr-only">Sort transactions</span>
       <select bind:value={sort} on:change={submit}>
@@ -95,23 +105,24 @@
           <th scope="col">Processed date</th>
           <th scope="col">Description</th>
           <th scope="col">Category</th>
-          <th scope="col" class="number">Amount</th>
-          <th scope="col" class="number">End-of-day position</th>
+          <th scope="col" class="number">Native amount</th>
+          <th scope="col" class="number">Base amount</th>
+          <th scope="col" class="number">Running balance</th>
         </tr>
       </thead>
       <tbody>
         {#if loading}
           {#each Array(5) as _}
             <tr class="placeholder">
-              <td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td>
+              <td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td><td><i></i></td>
             </tr>
           {/each}
         {:else if data.items.length === 0}
           <tr>
-            <td colspan="5">
+            <td colspan="6">
               <div class="empty">
-                <strong>{search || accountId || categoryId || direction ? 'No matching transactions' : 'Your ledger is empty'}</strong>
-                <span>{search || accountId || categoryId || direction ? 'Try clearing one of the filters.' : 'Imported transactions will appear here.'}</span>
+                <strong>{search || accountId || categoryId || direction || from || to ? 'No matching transactions' : 'Your ledger is empty'}</strong>
+                <span>{search || accountId || categoryId || direction || from || to ? 'Try clearing one of the filters.' : 'Imported transactions will appear here.'}</span>
               </div>
             </td>
           </tr>
@@ -130,11 +141,21 @@
                   <span>{transaction.accountName}{transaction.merchantName ? ` · ${transaction.description}` : ''}</span>
                 </div>
               </td>
-              <td><span class="category">{transaction.categoryName ?? 'Uncategorized'}</span></td>
+              <td>
+                <CategoryCell {transaction} {categories} onSave={onCategorySave} />
+              </td>
               <td class:credit={Number(transaction.amountNative) < 0} class="number amount">
                 {money(transaction.amountNative, transaction.currencyNative)}
               </td>
-              <td class="number balance">{money(transaction.runningBalance, transaction.currencyBase)}</td>
+              <td class:credit={Number(transaction.amountBase) < 0} class="number amount base-amount">
+                {money(transaction.amountBase, transaction.currencyBase)}
+              </td>
+              <td class="number balance">
+                {money(transaction.runningBalanceBase ?? transaction.runningBalance, transaction.currencyBase)}
+                {#if transaction.runningBalanceNative && transaction.currencyNative !== transaction.currencyBase}
+                  <small>{money(transaction.runningBalanceNative, transaction.currencyNative)} native</small>
+                {/if}
+              </td>
             </tr>
           {/each}
         {/if}
@@ -211,7 +232,7 @@
 
   .filters {
     display: grid;
-    grid-template-columns: minmax(210px, 1.6fr) repeat(4, minmax(118px, 0.7fr)) auto;
+    grid-template-columns: minmax(210px, 1.5fr) repeat(3, minmax(116px, 0.65fr)) repeat(2, minmax(128px, 0.7fr)) minmax(120px, 0.7fr) auto;
     gap: 0.55rem;
     margin-bottom: 1rem;
   }
@@ -230,6 +251,18 @@
   }
 
   .filters select { padding: 0 0.65rem; }
+  .date-filter { position: relative; }
+  .date-filter > span {
+    position: absolute;
+    z-index: 1;
+    top: 0.18rem;
+    left: 0.62rem;
+    color: var(--muted);
+    font-size: 0.51rem;
+    font-weight: 750;
+    text-transform: uppercase;
+  }
+  .date-filter input { padding: 0.75rem 0.45rem 0 0.58rem; font-size: 0.67rem; }
   .filters button {
     width: auto;
     padding: 0 1rem;
@@ -257,7 +290,7 @@
 
   table {
     width: 100%;
-    min-width: 780px;
+    min-width: 990px;
     border-collapse: collapse;
   }
 
@@ -286,10 +319,11 @@
   .description { display: grid; gap: 0.17rem; min-width: 220px; }
   .description strong { font-size: 0.77rem; }
   .description span { max-width: 42ch; overflow: hidden; color: var(--muted); font-size: 0.65rem; text-overflow: ellipsis; white-space: nowrap; }
-  .category { display: inline-block; padding: 0.25rem 0.5rem; color: #41504d; border-radius: 999px; background: #edf0eb; font-size: 0.66rem; font-weight: 700; }
   .amount { color: var(--ink); font-weight: 800; }
   .amount.credit { color: #237a64; }
+  .base-amount { color: #40504d; }
   .balance { color: var(--muted); }
+  .balance small { display: block; margin-top: 0.15rem; font-size: 0.58rem; }
 
   .empty {
     display: grid;

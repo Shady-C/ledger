@@ -3,491 +3,310 @@
   import type {
     AccountsResponse,
     BalanceResponse,
-    CategoriesResponse,
     CashflowResponse,
-    TransactionPage,
-    TransactionSort
+    FxAnalyticsResponse,
+    NetWorthResponse
   } from '@ledger/shared-types';
 
   import AccountStrip from '$lib/components/AccountStrip.svelte';
-  import BrandMark from '$lib/components/BrandMark.svelte';
-  import TransactionsTable from '$lib/components/TransactionsTable.svelte';
-  import UploadPanel from '$lib/components/UploadPanel.svelte';
+  import RecentTransactions from '$lib/components/RecentTransactions.svelte';
+  import UtilizationMeter from '$lib/components/UtilizationMeter.svelte';
+  import { readJson, readOptionalJson } from '$lib/components/api-client.js';
+  import type { AccountView, TransactionPageView } from '$lib/components/phase1-types.js';
   import BalanceChart from '$lib/charts/BalanceChart.svelte';
   import CashflowChart from '$lib/charts/CashflowChart.svelte';
-  import { apiMessage, money } from '$lib/format.js';
+  import { money } from '$lib/format.js';
 
-  const DEFAULT_PAGE_SIZE = 25;
-
-  let accounts: AccountsResponse['accounts'] = [];
-  let categories: CategoriesResponse['categories'] = [];
+  let accounts: AccountView[] = [];
   let balance: BalanceResponse = { currency: 'CAD', basis: 'net_activity', points: [] };
   let cashflow: CashflowResponse = { currency: 'CAD', points: [] };
-  let transactions: TransactionPage = {
-    items: [],
-    page: 1,
-    pageSize: DEFAULT_PAGE_SIZE,
-    total: 0,
-    totalPages: 0
-  };
-  let loadingSummary = true;
-  let loadingTransactions = true;
-  let pageError = '';
+  let transactions: TransactionPageView = { items: [], page: 1, pageSize: 6, total: 0, totalPages: 0 };
+  let netWorth: NetWorthResponse | null = null;
+  let fx: FxAnalyticsResponse | null = null;
+  let creditUtilization: AccountsResponse['creditUtilization'] | null = null;
   let selectedAccount = '';
-  let search = '';
-  let direction = '';
-  let categoryId = '';
-  let sort: TransactionSort = 'booked_date_desc';
-  let page = 1;
-  let pageSize = DEFAULT_PAGE_SIZE;
+  let loading = true;
+  let pageError = '';
 
-  $: currentAccount = accounts.find((account) => account.id === selectedAccount);
-  $: summaryAccount = currentAccount ?? (!selectedAccount && accounts.length === 1 ? accounts[0] : undefined);
-  $: currentBalance = summaryAccount?.currentBalance ?? balance.points.at(-1)?.balance ?? '0';
-  $: balanceBasis = summaryAccount?.balanceBasis ?? balance.basis;
-  $: balanceMetricLabel = balanceBasis === 'net_activity' ? 'Net activity' : 'Current balance';
-  $: balanceChartLabel = balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Running balance';
+  $: cards = accounts.filter((account) => account.kind === 'credit_card');
+  $: displayCurrency = netWorth?.baseCurrency ?? creditUtilization?.baseCurrency ?? balance.currency;
+  $: assets = netWorth?.assets ?? null;
+  $: liabilities = netWorth?.liabilities ?? null;
+  $: worth = netWorth?.netWorth ?? null;
   $: latestCashflow = cashflow.points.at(-1);
-  $: latestCashflowLabel = latestCashflow
-    ? `${new Intl.DateTimeFormat(undefined, {
-        month: 'short',
-        year: 'numeric',
-        timeZone: 'UTC'
-      }).format(new Date(`${latestCashflow.period}T00:00:00Z`))} net spend`
-    : 'Latest net spend';
+  $: partial = netWorth?.status === 'partial';
 
-  function queryString(includePage = false) {
-    const query = new URLSearchParams();
-    if (selectedAccount) query.set('accountId', selectedAccount);
-    if (search) query.set('search', search);
-    if (direction) query.set('direction', direction);
-    if (categoryId) query.set('categoryId', categoryId);
-    if (sort !== 'booked_date_desc') query.set('sort', sort);
-    if (includePage) {
-      if (page > 1) query.set('page', String(page));
-      if (pageSize !== DEFAULT_PAGE_SIZE) query.set('pageSize', String(pageSize));
-    }
-    const encoded = query.toString();
-    return encoded ? `?${encoded}` : '';
-  }
+  type DashboardSnapshot = {
+    accountResult: AccountsResponse;
+    balanceResult: BalanceResponse;
+    cashflowResult: CashflowResponse;
+    transactionResult: TransactionPageView;
+    worthResult: NetWorthResponse | null;
+    fxResult: FxAnalyticsResponse | null;
+  };
 
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, {
-      cache: 'no-store',
-      headers: { accept: 'application/json' }
-    });
-    if (!response.ok) throw new Error(await apiMessage(response, 'Ledger data is temporarily unavailable.'));
-    return response.json() as Promise<T>;
-  }
-
-  async function loadAccounts() {
-    const [accountResult, categoryResult] = await Promise.all([
-      fetchJson<AccountsResponse>('/api/accounts'),
-      fetchJson<CategoriesResponse>('/api/categories')
-    ]);
-    accounts = accountResult.accounts;
-    categories = categoryResult.categories;
-  }
-
-  async function loadAnalytics() {
-    const suffix = selectedAccount ? `?accountId=${encodeURIComponent(selectedAccount)}` : '';
-    [balance, cashflow] = await Promise.all([
-      fetchJson<BalanceResponse>(`/api/analytics/balance${suffix}`),
-      fetchJson<CashflowResponse>(`/api/analytics/cashflow${suffix}`)
+  function snapshotBaseCurrencies(snapshot: DashboardSnapshot) {
+    return new Set([
+      snapshot.accountResult.creditUtilization.baseCurrency,
+      ...snapshot.accountResult.accounts.map((account) => account.baseCurrency),
+      snapshot.balanceResult.currency,
+      snapshot.cashflowResult.currency,
+      ...(snapshot.worthResult ? [snapshot.worthResult.baseCurrency] : []),
+      ...(snapshot.fxResult ? [snapshot.fxResult.baseCurrency] : []),
+      ...snapshot.transactionResult.items.map((transaction) => transaction.currencyBase)
     ]);
   }
 
-  async function loadTransactions() {
-    loadingTransactions = true;
-    try {
-      transactions = await fetchJson<TransactionPage>(`/api/transactions${queryString(true)}`);
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'Transactions are temporarily unavailable.';
-      transactions = { items: [], page, pageSize, total: 0, totalPages: 0 };
-    } finally {
-      loadingTransactions = false;
+  async function fetchDashboardSnapshot(attempt = 0): Promise<DashboardSnapshot> {
+    const accountResult = await readJson<AccountsResponse>('/api/accounts');
+    const analyticsSuffix = selectedAccount ? `?accountId=${encodeURIComponent(selectedAccount)}` : '';
+    const [balanceResult, cashflowResult, transactionResult, worthResult, fxResult] = await Promise.all([
+      readJson<BalanceResponse>(`/api/analytics/balance${analyticsSuffix}`),
+      readJson<CashflowResponse>(`/api/analytics/cashflow${analyticsSuffix}`),
+      readJson<TransactionPageView>(`/api/transactions?pageSize=6${selectedAccount ? `&accountId=${encodeURIComponent(selectedAccount)}` : ''}`),
+      readOptionalJson<NetWorthResponse>('/api/analytics/net-worth').catch(() => null),
+      readOptionalJson<FxAnalyticsResponse>('/api/analytics/fx').catch(() => null)
+    ]);
+    const snapshot = { accountResult, balanceResult, cashflowResult, transactionResult, worthResult, fxResult };
+
+    if (snapshotBaseCurrencies(snapshot).size > 1) {
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)));
+        return fetchDashboardSnapshot(attempt + 1);
+      }
+      throw new Error('Ledger valuation changed during this refresh. Try again to load one consistent base currency.');
     }
+    return snapshot;
   }
 
-  async function loadDashboard(refreshAccounts = false) {
-    loadingSummary = true;
+  async function loadDashboard() {
+    loading = true;
     pageError = '';
     try {
-      if (refreshAccounts) await loadAccounts();
-      await Promise.all([loadAnalytics(), loadTransactions()]);
+      const {
+        accountResult,
+        balanceResult,
+        cashflowResult,
+        transactionResult,
+        worthResult,
+        fxResult
+      } = await fetchDashboardSnapshot();
+      accounts = accountResult.accounts;
+      creditUtilization = accountResult.creditUtilization;
+      balance = balanceResult;
+      cashflow = cashflowResult;
+      transactions = transactionResult;
+      netWorth = worthResult;
+      fx = fxResult;
     } catch (error) {
-      pageError = error instanceof Error ? error.message : 'Ledger data is temporarily unavailable.';
-      balance = { currency: balance.currency, basis: balance.basis, points: [] };
-      cashflow = { currency: cashflow.currency, points: [] };
+      pageError = error instanceof Error ? error.message : 'The dashboard is temporarily unavailable.';
     } finally {
-      loadingSummary = false;
+      loading = false;
     }
   }
 
-  async function selectAccount(id: string) {
-    selectedAccount = id;
-    page = 1;
+  async function selectAccount(accountId: string) {
+    selectedAccount = accountId;
     await loadDashboard();
   }
 
-  async function applyFilters(filters: {
-    search: string;
-    accountId: string;
-    categoryId: string;
-    direction: string;
-    sort: TransactionSort;
-  }) {
-    search = filters.search.trim();
-    selectedAccount = filters.accountId;
-    categoryId = filters.categoryId;
-    direction = filters.direction;
-    sort = filters.sort;
-    page = 1;
-    await loadDashboard();
-  }
-
-  async function changePage(next: number) {
-    const lastPage = Math.max(transactions.totalPages, 1);
-    page = Math.min(Math.max(Math.trunc(next), 1), lastPage);
-    await loadTransactions();
-  }
-
-  async function changePageSize(next: number) {
-    pageSize = next;
-    page = 1;
-    await loadTransactions();
-  }
-
-  onMount(async () => {
-    try {
-      await loadAccounts();
-      await loadDashboard();
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'Ledger is temporarily unavailable.';
-      loadingSummary = false;
-      loadingTransactions = false;
-    }
-  });
+  onMount(loadDashboard);
 </script>
 
 <svelte:head>
-  <title>Ledger · Your financial record</title>
-  <meta name="description" content="Import, reconcile, and inspect your self-hosted financial ledger." />
+  <title>Dashboard · Ledger</title>
+  <meta name="description" content="Your net worth, balances, card utilization, and recent ledger activity." />
 </svelte:head>
 
-<header class="site-header">
-  <a class="brand" href="/" aria-label="Ledger dashboard">
-    <BrandMark />
-    <span>Ledger</span>
-  </a>
-  <div class="privacy"><span aria-hidden="true"></span> Self-hosted & private</div>
-</header>
-
-<main>
-  <section class="hero" aria-labelledby="page-title">
-    <div class="hero-copy">
-      <p class="kicker">Your financial record</p>
-      <h1 id="page-title">Every number.<br /><em>Accounted for.</em></h1>
-      <p class="lede">One deterministic ledger across your statements, with every balance traceable to its source.</p>
+<div class="page dashboard-page">
+  <header class="page-header dashboard-header">
+    <div class="page-header-copy">
+      <p class="eyebrow">Financial overview</p>
+      <h1>Know where you stand.</h1>
+      <p class="lede">A current, traceable view of your assets, liabilities, spending, and available credit.</p>
     </div>
-    <div class="hero-metrics" aria-label="Ledger summary">
-      <div>
-        <span>{balanceMetricLabel}</span>
-        <strong>{loadingSummary ? '—' : money(currentBalance, summaryAccount?.nativeCurrency ?? balance.currency)}</strong>
-      </div>
-      <div>
-        <span>{latestCashflowLabel}</span>
-        <strong class:positive={Number(latestCashflow?.net ?? 0) >= 0}>
-          {loadingSummary || !latestCashflow ? '—' : money(latestCashflow.net, cashflow.currency)}
-        </strong>
-      </div>
-      <div>
-        <span>Ledger records</span>
-        <strong>{loadingTransactions ? '—' : transactions.total.toLocaleString()}</strong>
-      </div>
-    </div>
-  </section>
+    <a class="button" href="/imports"><span aria-hidden="true">↑</span> Import statements</a>
+  </header>
 
   {#if pageError}
-    <div class="error-banner" role="alert">
+    <div class="status-banner" role="alert">
       <strong>We couldn’t refresh everything.</strong>
       <span>{pageError}</span>
-      <button type="button" on:click={() => loadDashboard(true)}>Try again</button>
+      <button class="button-secondary" type="button" on:click={loadDashboard}>Try again</button>
     </div>
   {/if}
 
-  <AccountStrip
-    {accounts}
-    loading={loadingSummary && accounts.length === 0}
-    selected={selectedAccount}
-    onSelect={selectAccount}
-  />
+  {#if partial}
+    <div class="status-banner info" role="status">
+      <strong>Net worth is partial.</strong>
+      <span>
+        {netWorth?.excludedAccounts.length ?? 0} {(netWorth?.excludedAccounts.length ?? 0) === 1 ? 'account is' : 'accounts are'} excluded until a verified balance and current exchange rate are available.
+      </span>
+      <a class="text-button" href="/accounts">Review accounts</a>
+    </div>
+  {/if}
 
-  <UploadPanel {accounts} onComplete={() => loadDashboard(true)} />
+  <section class="metrics" aria-label="Net worth summary">
+    <article class="metric net-worth">
+      <span>Net worth</span>
+      <strong class:negative={worth?.startsWith('-')}>{loading || worth == null ? '—' : money(worth, displayCurrency)}</strong>
+      <small>{netWorth ? `Valued ${netWorth.valuationDate}` : `${displayCurrency} current snapshot`}</small>
+    </article>
+    <article class="metric">
+      <span>Assets</span>
+      <strong>{loading || assets == null ? '—' : money(assets, displayCurrency)}</strong>
+      <small>{accounts.filter((account) => account.kind !== 'credit_card').length} asset accounts</small>
+    </article>
+    <article class="metric liability">
+      <span>Liabilities</span>
+      <strong>{loading || liabilities == null ? '—' : money(liabilities, displayCurrency)}</strong>
+      <small>{cards.length} credit {cards.length === 1 ? 'card' : 'cards'}</small>
+    </article>
+    <article class="metric">
+      <span>Estimated FX fees</span>
+      <strong>{loading || fx?.totalEstimatedFeeBase == null ? '—' : money(fx.totalEstimatedFeeBase, fx.baseCurrency)}</strong>
+      <small>{fx ? `${fx.transactions.length} foreign-spend records` : 'Waiting for comparable rates'}</small>
+    </article>
+  </section>
+
+  <AccountStrip {accounts} {loading} selected={selectedAccount} onSelect={selectAccount} />
+
+  <section class="credit-panel panel" aria-labelledby="credit-heading">
+    <div class="panel-heading">
+      <div>
+        <h2 id="credit-heading">Credit utilization</h2>
+        <p>Card balances compared with their native-currency limits.</p>
+      </div>
+      <a class="text-button" href="/accounts">Manage limits <span aria-hidden="true">→</span></a>
+    </div>
+
+    {#if loading}
+      <div class="skeleton-block" aria-label="Loading credit utilization" aria-busy="true"></div>
+    {:else if cards.length === 0}
+      <div class="empty-state">
+        <strong>No credit cards yet</strong>
+        <p>Add a credit-card account to track available credit and utilization.</p>
+      </div>
+    {:else}
+      <div class="credit-grid">
+        <article class="aggregate">
+          <span>Across cards with limits</span>
+          <strong>{creditUtilization?.utilizationPercent == null ? '—' : `${creditUtilization.utilizationPercent}%`}</strong>
+          <UtilizationMeter
+            label="Aggregate credit utilization"
+            value={creditUtilization?.utilizationPercent}
+            used={creditUtilization?.usedCreditBase}
+            limit={creditUtilization?.creditLimitBase}
+            available={creditUtilization?.availableCreditBase}
+            currency={creditUtilization?.baseCurrency ?? displayCurrency}
+          />
+          {#if creditUtilization?.excludedAccounts.length}
+            <small>{creditUtilization.excludedAccounts.length} {creditUtilization.excludedAccounts.length === 1 ? 'card excluded' : 'cards excluded'} from the aggregate.</small>
+          {/if}
+        </article>
+        {#each cards as card}
+          <article class="card-utilization">
+            <div>
+              <span>{card.institutionName ?? 'Credit card'}</span>
+              <strong>{card.displayName}</strong>
+            </div>
+            <UtilizationMeter
+              label={`${card.displayName} utilization`}
+              value={card.utilizationPercent}
+              used={card.usedCredit}
+              limit={card.creditLimit}
+              available={card.availableCredit}
+              currency={card.nativeCurrency}
+            />
+          </article>
+        {/each}
+      </div>
+    {/if}
+  </section>
 
   <section class="charts" aria-label="Ledger analytics">
-    <article class="chart-card balance-card">
-      <div class="chart-heading">
+    <article class="panel chart-card balance-card">
+      <div class="panel-heading">
         <div>
-          <p>Daily position</p>
-          <h2>{balanceChartLabel}</h2>
+          <h2>{balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Daily position'}</h2>
+          <p>{selectedAccount ? 'Selected-account balance history.' : 'Consolidated balance history.'}</p>
         </div>
-        <span>{balance.currency}</span>
+        <span class="pill">{balance.currency}</span>
       </div>
       <BalanceChart
         points={balance.points}
         currency={balance.currency}
-        loading={loadingSummary}
-        label={balanceChartLabel}
+        {loading}
+        label={balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Running balance'}
       />
     </article>
 
-    <article class="chart-card">
-      <div class="chart-heading">
+    <article class="panel chart-card">
+      <div class="panel-heading">
         <div>
-          <p>Period movement</p>
           <h2>Cash flow</h2>
+          <p>{latestCashflow ? `Latest net ${money(latestCashflow.net, cashflow.currency)}.` : 'Monthly inflows and outflows.'}</p>
         </div>
-        <span>{cashflow.currency}</span>
+        <span class="pill">{cashflow.currency}</span>
       </div>
-      <CashflowChart points={cashflow.points} currency={cashflow.currency} loading={loadingSummary} />
+      <CashflowChart points={cashflow.points} currency={cashflow.currency} {loading} />
     </article>
   </section>
 
-  <TransactionsTable
-    data={transactions}
-    {accounts}
-    {categories}
-    loading={loadingTransactions}
-    {search}
-    accountId={selectedAccount}
-    {categoryId}
-    {direction}
-    {sort}
-    onFilter={applyFilters}
-    onPage={changePage}
-    onPageSize={changePageSize}
-  />
-</main>
-
-<footer>
-  <span>Ledger</span>
-  <p>Deterministic by design. Your financial arithmetic never leaves the code path.</p>
-</footer>
+  <RecentTransactions transactions={transactions.items} {loading} />
+</div>
 
 <style>
-  .site-header {
-    display: flex;
-    width: min(1180px, calc(100% - 2rem));
-    margin: 0 auto;
-    padding: 1.25rem 0;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.55rem;
-    color: var(--forest);
-    font-size: 1rem;
-    font-weight: 850;
-    letter-spacing: -0.04em;
-    text-decoration: none;
-  }
-
-  .privacy {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    color: var(--muted);
-    font-size: 0.68rem;
-    font-weight: 700;
-  }
-
-  .privacy span {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #4eae86;
-    box-shadow: 0 0 0 4px rgb(78 174 134 / 12%);
-  }
-
-  main {
+  .dashboard-page { gap: clamp(1rem, 2.4vw, 1.7rem); }
+  .dashboard-header { padding-bottom: 0.5rem; }
+  .dashboard-header h1 { font-size: clamp(2.65rem, 6vw, 5.2rem); }
+  .metrics { display: grid; grid-template-columns: 1.35fr repeat(3, 1fr); gap: 0.75rem; }
+  .metric {
     display: grid;
-    width: min(1180px, calc(100% - 2rem));
-    margin: 0 auto;
-    gap: clamp(1.3rem, 3vw, 2.2rem);
-  }
-
-  .hero {
-    display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
-    gap: clamp(2rem, 7vw, 6rem);
-    align-items: end;
-    min-height: 350px;
-    padding: clamp(2rem, 6vw, 4.8rem) 0 clamp(2rem, 5vw, 3.8rem);
-  }
-
-  .kicker {
-    margin: 0 0 0.8rem;
-    color: var(--coral);
-    font-size: 0.72rem;
-    font-weight: 850;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-  }
-
-  h1 {
-    margin: 0;
-    color: var(--forest);
-    font-size: clamp(3rem, 8vw, 6.2rem);
-    font-weight: 740;
-    line-height: 0.9;
-    letter-spacing: -0.07em;
-  }
-
-  h1 em {
-    color: var(--coral);
-    font-family: Georgia, 'Times New Roman', serif;
-    font-weight: 400;
-    letter-spacing: -0.055em;
-  }
-
-  .lede {
-    max-width: 49ch;
-    margin: 1.25rem 0 0;
-    color: var(--muted);
-    font-size: 0.9rem;
-    line-height: 1.65;
-  }
-
-  .hero-metrics {
-    display: grid;
-    border-top: 1px solid #cdd3cc;
-  }
-
-  .hero-metrics div {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 1rem 0;
-    border-bottom: 1px solid #cdd3cc;
-  }
-
-  .hero-metrics span {
-    color: var(--muted);
-    font-size: 0.7rem;
-    font-weight: 750;
-  }
-
-  .hero-metrics strong {
-    color: var(--forest);
-    font-size: clamp(1.2rem, 2.5vw, 1.75rem);
-    letter-spacing: -0.045em;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .hero-metrics strong.positive { color: #237a64; }
-
-  .error-banner {
-    display: flex;
-    align-items: center;
-    gap: 0.7rem;
-    padding: 0.8rem 1rem;
-    color: #722f24;
-    border: 1px solid #e7b9ab;
-    border-radius: 12px;
-    background: #fff0e9;
-    font-size: 0.76rem;
-  }
-
-  .error-banner span { flex: 1; }
-  .error-banner button {
-    padding: 0.4rem 0.65rem;
-    color: #722f24;
-    border: 1px solid #d99f8e;
-    border-radius: 7px;
-    background: white;
-    font-size: 0.7rem;
-    font-weight: 800;
-  }
-
-  .charts {
-    display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
-    gap: 1rem;
-  }
-
-  .chart-card {
     min-width: 0;
-    padding: clamp(1rem, 2.3vw, 1.5rem);
+    min-height: 132px;
+    padding: 1rem;
+    align-content: space-between;
+    gap: 0.7rem;
     border: 1px solid var(--line);
-    border-radius: 22px;
-    background: var(--paper);
-    box-shadow: var(--shadow);
+    border-radius: 16px;
+    background: rgb(252 251 247 / 82%);
   }
-
-  .chart-heading {
-    display: flex;
-    align-items: start;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 0.7rem;
-  }
-
-  .chart-heading p,
-  .chart-heading h2 { margin: 0; }
-  .chart-heading p {
-    margin-bottom: 0.2rem;
-    color: var(--coral);
-    font-size: 0.68rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-  .chart-heading h2 { font-size: 1.25rem; letter-spacing: -0.035em; }
-  .chart-heading > span {
-    padding: 0.25rem 0.45rem;
-    color: var(--muted);
-    border-radius: 6px;
-    background: #efeee8;
-    font-size: 0.62rem;
-    font-weight: 800;
-  }
-
-  footer {
-    display: flex;
-    width: min(1180px, calc(100% - 2rem));
-    margin: 3rem auto 0;
-    padding: 1.5rem 0 2.5rem;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    color: var(--muted);
-    border-top: 1px solid #d8d9d2;
-    font-size: 0.68rem;
-  }
-  footer span { color: var(--forest); font-weight: 850; }
-  footer p { margin: 0; text-align: right; }
-
-  @media (max-width: 900px) {
-    .hero { grid-template-columns: 1fr; min-height: 0; }
-    .hero-metrics { grid-template-columns: repeat(3, 1fr); }
-    .hero-metrics div { display: grid; align-content: start; }
+  .metric.net-worth { color: white; border-color: var(--forest); background: var(--forest); box-shadow: var(--shadow); }
+  .metric > span { color: var(--muted); font-size: 0.67rem; font-weight: 750; }
+  .metric.net-worth > span,
+  .metric.net-worth small { color: #bcd0ca; }
+  .metric strong { overflow: hidden; color: var(--forest); font-size: clamp(1.25rem, 2.3vw, 1.85rem); letter-spacing: -0.05em; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .metric.net-worth strong { color: white; }
+  .metric strong.negative,
+  .metric.liability strong { color: var(--coral); }
+  .metric small { color: var(--muted); font-size: 0.62rem; }
+  .credit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
+  .aggregate,
+  .card-utilization { display: grid; min-height: 150px; padding: 1rem; align-content: space-between; gap: 1rem; border: 1px solid #e3e4de; border-radius: 14px; background: #f8f7f2; }
+  .aggregate { color: white; border-color: var(--forest-mid); background: var(--forest-mid); }
+  .aggregate > span,
+  .card-utilization > div span { color: var(--muted); font-size: 0.64rem; font-weight: 700; }
+  .aggregate > span { color: #bcd0ca; }
+  .aggregate > strong { font-size: 2rem; letter-spacing: -0.05em; }
+  .aggregate :global(.topline span),
+  .aggregate :global(.details),
+  .aggregate > small { color: #bcd0ca; }
+  .aggregate :global(.topline strong) { color: white; }
+  .aggregate > small { font-size: 0.6rem; line-height: 1.4; }
+  .card-utilization > div { display: grid; gap: 0.2rem; }
+  .card-utilization > div strong { font-size: 0.84rem; }
+  .charts { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr); gap: 1rem; }
+  .chart-card { min-width: 0; }
+  @media (max-width: 980px) {
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .credit-grid { grid-template-columns: repeat(2, 1fr); }
     .charts { grid-template-columns: 1fr; }
   }
-
   @media (max-width: 620px) {
-    .site-header,
-    main,
-    footer { width: min(100% - 1.2rem, 1180px); }
-    .hero { padding-top: 2.5rem; }
-    .hero-metrics { grid-template-columns: 1fr; }
-    .hero-metrics div { display: flex; }
-    .error-banner { align-items: flex-start; flex-wrap: wrap; }
-    .error-banner span { flex-basis: 70%; }
-    footer { align-items: start; }
+    .metrics,
+    .credit-grid { grid-template-columns: 1fr; }
+    .metric { min-height: 112px; }
+    .dashboard-header .button { width: 100%; }
   }
 </style>

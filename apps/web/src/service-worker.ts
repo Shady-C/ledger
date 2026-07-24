@@ -46,15 +46,21 @@ worker.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== worker.location.origin) return;
 
-  const privateAggregate =
-    url.pathname === '/api/accounts' || url.pathname.startsWith('/api/analytics/');
+  const privateAggregate = new Set([
+    '/api/analytics/balance',
+    '/api/analytics/cashflow'
+  ]).has(url.pathname);
   if (privateAggregate) {
     event.respondWith(networkFirst(request, readCache));
     return;
   }
 
   if (request.mode === 'navigate') {
-    event.respondWith(networkFirst(request, shellCache));
+    if (url.pathname === '/') {
+      event.respondWith(networkFirst(request, shellCache));
+    } else {
+      event.respondWith(fetch(request));
+    }
     return;
   }
 

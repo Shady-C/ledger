@@ -8,7 +8,8 @@
     "build": "svelte-kit sync && vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run && vitest run --config vitest.components.config.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
@@ -20,10 +21,14 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@sveltejs/adapter-node": "^5.2.12",
     "@sveltejs/kit": "^2.20.2",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@testing-library/svelte": "5.4.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/pg": "^8.11.11",
+    "jsdom": "29.1.1",
     "svelte": "^5.23.1",
     "svelte-check": "^4.1.4",
     "typescript": "^5.7.3",

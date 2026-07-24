@@ -1,10 +1,19 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import type { AccountSummary, IngestAccepted, JobResponse } from '@ledger/shared-types';
+  import type { IngestAccepted, IngestResult, JobStatus } from '@ledger/shared-types';
 
   import { apiMessage } from '$lib/format.js';
+  import type { AccountView } from './phase1-types.js';
 
-  export let accounts: AccountSummary[] = [];
+  type IngestJobResponse = {
+    id: string;
+    kind?: 'ingest';
+    status: JobStatus;
+    result: IngestResult | null;
+    error: string | null;
+  };
+
+  export let accounts: AccountView[] = [];
   export let onComplete: () => void = () => undefined;
 
   let accountId = '';
@@ -20,7 +29,7 @@
   $: if (!accountId && accounts.length === 1) accountId = accounts[0]?.id ?? '';
 
   function choose(selected: FileList | File[]) {
-    files = Array.from(selected).filter((file) => /\.(csv|xlsx|pdf)$/i.test(file.name));
+    files = Array.from(selected).filter((file) => /\.(csv|xlsx|pdf|ofx|qfx)$/i.test(file.name));
     tone = 'neutral';
     message = files.length ? `${files.length} ${files.length === 1 ? 'statement' : 'statements'} ready` : '';
   }
@@ -41,7 +50,7 @@
     try {
       const response = await fetch(`/api/jobs/${jobId}`, { headers: { accept: 'application/json' } });
       if (!response.ok) throw new Error(await apiMessage(response, 'Could not check the import.'));
-      const job = (await response.json()) as JobResponse;
+      const job = (await response.json()) as IngestJobResponse;
       if (job.status === 'done') {
         const added = job.result?.added ?? 0;
         const skipped = job.result?.skipped ?? 0;
@@ -65,7 +74,7 @@
         tone = 'error';
         const addedBeforeStop = job.result?.added ?? 0;
         message = job.status === 'needs_ai'
-          ? `${addedBeforeStop ? `${addedBeforeStop} added. ` : ''}At least one statement needs a parser that is not available in Phase 0.`
+          ? `${addedBeforeStop ? `${addedBeforeStop} added. ` : ''}At least one statement is waiting for a reviewed AI column map.`
           : `${addedBeforeStop ? `${addedBeforeStop} added before the import stopped. ` : ''}${job.error || 'The import failed. Check the worker logs for details.'}`;
         submitting = false;
         onComplete();
@@ -111,7 +120,7 @@
   <div class="copy">
     <p class="eyebrow">Statement inbox</p>
     <h2 id="upload-title">Turn statements into an auditable ledger.</h2>
-    <p class="support">CSV, XLSX, or deterministic PDF. Repeat uploads are safely skipped.</p>
+    <p class="support">CSV, XLSX, OFX/QFX, or deterministic PDF. Repeat uploads are safely skipped.</p>
   </div>
 
   <form on:submit|preventDefault={upload}>
@@ -145,7 +154,7 @@
         class="sr-only"
         bind:this={input}
         type="file"
-        accept=".csv,.xlsx,.pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf"
+        accept=".csv,.xlsx,.pdf,.ofx,.qfx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf,application/x-ofx"
         multiple
         disabled={accounts.length === 0 || submitting}
         on:change={(event) => choose(event.currentTarget.files ?? [])}

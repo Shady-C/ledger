@@ -12,6 +12,6 @@
     "build": "pnpm --recursive --if-present run build",
     "check": "pnpm --recursive --if-present run check",
     "dev": "pnpm --parallel --recursive --if-present run dev",
-    "test": "pnpm --recursive --if-present run test"
+    "test": "pnpm --recursive --if-present run test && pnpm --filter @ledger/web run test:e2e"
   }
 }
