@@ -12,7 +12,9 @@ describe('accountsSummarySql', () => {
   it('falls back to opening plus all activity when the latest closing is unknown', () => {
     expect(accountsSummarySql).toContain('WHEN latest.closing_balance IS NOT NULL');
     expect(accountsSummarySql).toContain('COALESCE(earliest.opening_balance, 0) + COALESCE(SUM(t.amount_native), 0)');
-    expect(accountsSummarySql).toContain('t.booked_date > latest.period_end');
+    expect(accountsSummarySql).toContain('COALESCE(t.posted_date, t.booked_date) > latest.period_end');
+    expect(accountsSummarySql).toContain('AND s.closing_balance IS NOT NULL');
+    expect(accountsSummarySql).toContain("ELSE 'net_activity'");
   });
 });
 
@@ -29,7 +31,9 @@ describe('buildTransactionQueries', () => {
     const built = buildTransactionQueries(spec);
 
     expect(built.data.text).not.toContain('Cafe');
-    expect(built.data.text).toContain('ORDER BY amount_base DESC');
+    expect(built.data.text).toContain(
+      'ORDER BY ABS(amount_base) DESC, COALESCE(posted_date, booked_date) DESC'
+    );
     expect(built.data.values).toEqual([
       'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
       'debit',
@@ -40,11 +44,26 @@ describe('buildTransactionQueries', () => {
     expect(built.count.values).toHaveLength(3);
   });
 
+  it('sorts amount choices by magnitude and applies the requested page offset', () => {
+    const built = buildTransactionQueries(
+      transactionQuerySchema.parse({ page: '3', pageSize: '50', sort: 'amount_asc' })
+    );
+
+    expect(built.data.text).toContain(
+      'ORDER BY ABS(amount_base) ASC, COALESCE(posted_date, booked_date) DESC'
+    );
+    expect(built.data.values.slice(-2)).toEqual([50, 100]);
+  });
+
   it('adds the earliest statement opening balance before the running sum', () => {
     const built = buildTransactionQueries(transactionQuerySchema.parse({ sort: 'booked_date_asc' }));
-    expect(built.data.text).toContain('COALESCE(o.opening_balance, 0) + SUM(t.amount_base)');
+    expect(built.data.text).toContain('COALESCE(o.opening_balance, 0) + SUM(d.delta)');
     expect(built.data.text).toContain('ORDER BY s.account_id, s.period_start, s.id');
-    expect(built.data.text).toContain('ORDER BY booked_date ASC, id ASC');
+    expect(built.data.text).toContain('COALESCE(t.posted_date, t.booked_date) AS effective_date');
+    expect(built.data.text).toContain('GROUP BY account_id, effective_date');
+    expect(built.data.text).toContain(
+      'ORDER BY COALESCE(posted_date, booked_date) ASC, booked_date ASC, id ASC'
+    );
   });
 });
 
@@ -71,7 +90,13 @@ describe('analytics query builders', () => {
   it('sums each selected account opening before all dated deltas', () => {
     const built = buildBalanceQuery(analyticsQuerySchema.parse({ from: '2026-04-01' }));
     expect(built.text).toContain('SUM(first_statement.opening_balance)');
+    expect(built.text).toContain('BOOL_AND(first_statement.opening_balance IS NOT NULL)');
+    expect(built.text).toContain('SELECT s.opening_balance');
+    expect(built.text).not.toContain('SELECT COALESCE(s.opening_balance, 0)');
+    expect(built.text).toContain("ELSE 'net_activity'");
     expect(built.text).toContain('(SELECT amount FROM opening)');
+    expect(built.text).toContain('COALESCE(t.posted_date, t.booked_date) AS date');
+    expect(built.text).toContain('GROUP BY COALESCE(t.posted_date, t.booked_date)');
     expect(built.text.indexOf('SUM(delta) OVER')).toBeLessThan(built.text.indexOf('WHERE date >='));
   });
 

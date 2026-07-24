@@ -30,11 +30,21 @@ export const accountsSummarySql = `
       CASE
         WHEN latest.closing_balance IS NOT NULL THEN
           latest.closing_balance
-          + COALESCE(SUM(t.amount_native) FILTER (WHERE t.booked_date > latest.period_end), 0)
+          + COALESCE(
+              SUM(t.amount_native) FILTER (
+                WHERE COALESCE(t.posted_date, t.booked_date) > latest.period_end
+              ),
+              0
+            )
         ELSE
           COALESCE(earliest.opening_balance, 0) + COALESCE(SUM(t.amount_native), 0)
       END
     )::text AS current_balance,
+    CASE
+      WHEN latest.closing_balance IS NOT NULL OR earliest.opening_balance IS NOT NULL
+        THEN 'balance'
+      ELSE 'net_activity'
+    END AS balance_basis,
     latest.period_end::text AS last_statement_date
   FROM account a
   LEFT JOIN institution i ON i.id = a.institution_id
@@ -42,6 +52,7 @@ export const accountsSummarySql = `
     SELECT s.period_end, s.closing_balance
     FROM statement s
     WHERE s.account_id = a.id
+      AND s.closing_balance IS NOT NULL
     ORDER BY s.period_end DESC, s.id DESC
     LIMIT 1
   ) latest ON true
@@ -67,10 +78,14 @@ export const accountsSummarySql = `
 `;
 
 const transactionSortSql: Record<TransactionQuery['sort'], string> = {
-  booked_date_desc: 'booked_date DESC, id DESC',
-  booked_date_asc: 'booked_date ASC, id ASC',
-  amount_desc: 'amount_base DESC, booked_date DESC, id DESC',
-  amount_asc: 'amount_base ASC, booked_date DESC, id DESC'
+  booked_date_desc:
+    'COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC',
+  booked_date_asc:
+    'COALESCE(posted_date, booked_date) ASC, booked_date ASC, id ASC',
+  amount_desc:
+    'ABS(amount_base) DESC, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC',
+  amount_asc:
+    'ABS(amount_base) ASC, COALESCE(posted_date, booked_date) DESC, booked_date DESC, id DESC'
 };
 
 function addValue(values: unknown[], value: unknown): string {
@@ -106,10 +121,10 @@ export function buildTransactionQueries(spec: TransactionQuery): {
     WITH opening AS (
       SELECT DISTINCT ON (s.account_id)
         s.account_id,
-        COALESCE(s.opening_balance, 0) AS opening_balance
+        s.opening_balance
       FROM statement s
       ORDER BY s.account_id, s.period_start, s.id
-    ), ledger AS (
+    ), base AS (
       SELECT
         t.id,
         t.account_id,
@@ -127,16 +142,30 @@ export function buildTransactionQueries(spec: TransactionQuery): {
         t.fx_rate,
         t.direction,
         t.enrichment,
-        COALESCE(o.opening_balance, 0) + SUM(t.amount_base) OVER (
-          PARTITION BY t.account_id
-          ORDER BY t.booked_date, t.id
-          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS running_balance
+        COALESCE(t.posted_date, t.booked_date) AS effective_date
       FROM txn t
       JOIN account a ON a.id = t.account_id
-      LEFT JOIN opening o ON o.account_id = t.account_id
       LEFT JOIN merchant m ON m.id = t.merchant_id
       LEFT JOIN category c ON c.id = t.category_id
+    ), daily AS (
+      SELECT account_id, effective_date, SUM(amount_base) AS delta
+      FROM base
+      GROUP BY account_id, effective_date
+    ), daily_position AS (
+      SELECT
+        d.account_id,
+        d.effective_date,
+        COALESCE(o.opening_balance, 0) + SUM(d.delta) OVER (
+          PARTITION BY d.account_id
+          ORDER BY d.effective_date
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS running_balance
+      FROM daily d
+      LEFT JOIN opening o ON o.account_id = d.account_id
+    ), ledger AS (
+      SELECT base.*, daily_position.running_balance
+      FROM base
+      JOIN daily_position USING (account_id, effective_date)
     )`;
 
   const limit = addValue(values, spec.pageSize);
@@ -205,28 +234,34 @@ export function buildBalanceQuery(spec: AnalyticsQuery): BuiltQuery {
         FROM account a
         ${selectedWhere}
       ), opening AS (
-        SELECT COALESCE(SUM(first_statement.opening_balance), 0) AS amount
+        SELECT
+          COALESCE(SUM(first_statement.opening_balance), 0) AS amount,
+          CASE
+            WHEN BOOL_AND(first_statement.opening_balance IS NOT NULL) THEN 'balance'
+            ELSE 'net_activity'
+          END AS basis
         FROM selected_accounts selected
         LEFT JOIN LATERAL (
-          SELECT COALESCE(s.opening_balance, 0) AS opening_balance
+          SELECT s.opening_balance
           FROM statement s
           WHERE s.account_id = selected.id
           ORDER BY s.period_start, s.id
           LIMIT 1
         ) first_statement ON true
       ), daily AS (
-        SELECT t.booked_date AS date, SUM(t.amount_base) AS delta
+        SELECT COALESCE(t.posted_date, t.booked_date) AS date, SUM(t.amount_base) AS delta
         FROM txn t
         JOIN selected_accounts selected ON selected.id = t.account_id
-        GROUP BY t.booked_date
+        GROUP BY COALESCE(t.posted_date, t.booked_date)
       ), running AS (
         SELECT
           date,
           (SELECT amount FROM opening)
-            + SUM(delta) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING) AS balance
+            + SUM(delta) OVER (ORDER BY date ROWS UNBOUNDED PRECEDING) AS balance,
+          (SELECT basis FROM opening) AS basis
         FROM daily
       )
-      SELECT date::text, balance::text
+      SELECT date::text, balance::text, basis
       FROM running
       ${outerWhere}
       ORDER BY date`,

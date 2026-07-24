@@ -9,6 +9,7 @@
   export let points: BalancePoint[] = [];
   export let currency = 'CAD';
   export let loading = false;
+  export let label = 'Running balance';
 
   let host: HTMLDivElement;
   let chart: UPlot | undefined;
@@ -41,7 +42,7 @@
         series: [
           {},
           {
-            label: 'Balance',
+            label,
             stroke: '#e36f54',
             width: 2.5,
             fill: 'rgba(227, 111, 84, 0.10)',
@@ -77,15 +78,15 @@
     class="chart"
     bind:this={host}
     role="img"
-    aria-label={`Running balance chart with ${points.length} daily points in ${currency}`}
+    aria-label={`${label} chart with ${points.length} daily points in ${currency}`}
   ></div>
   {#if loading}
     <div class="loading" aria-label="Loading running balance" aria-busy="true"></div>
   {:else if points.length === 0}
     <div class="empty">
       <span aria-hidden="true">⌁</span>
-      <strong>No balance history yet</strong>
-      <p>Import a statement to draw your first running-balance line.</p>
+      <strong>No history yet</strong>
+      <p>Import a statement to draw your first ledger-position line.</p>
     </div>
   {/if}
 </div>

@@ -43,6 +43,6 @@ export function unavailableOrInternal(error: unknown, context: string) {
 }
 
 export const privateReadHeaders = {
-  'cache-control': 'private, max-age=15, stale-while-revalidate=60',
+  'cache-control': 'no-store',
   vary: 'accept-encoding'
 };

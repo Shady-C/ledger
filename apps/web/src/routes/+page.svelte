@@ -17,11 +17,19 @@
   import CashflowChart from '$lib/charts/CashflowChart.svelte';
   import { apiMessage, money } from '$lib/format.js';
 
+  const DEFAULT_PAGE_SIZE = 25;
+
   let accounts: AccountsResponse['accounts'] = [];
   let categories: CategoriesResponse['categories'] = [];
-  let balance: BalanceResponse = { currency: 'CAD', points: [] };
+  let balance: BalanceResponse = { currency: 'CAD', basis: 'net_activity', points: [] };
   let cashflow: CashflowResponse = { currency: 'CAD', points: [] };
-  let transactions: TransactionPage = { items: [], page: 1, pageSize: 25, total: 0, totalPages: 0 };
+  let transactions: TransactionPage = {
+    items: [],
+    page: 1,
+    pageSize: DEFAULT_PAGE_SIZE,
+    total: 0,
+    totalPages: 0
+  };
   let loadingSummary = true;
   let loadingTransactions = true;
   let pageError = '';
@@ -31,10 +39,22 @@
   let categoryId = '';
   let sort: TransactionSort = 'booked_date_desc';
   let page = 1;
+  let pageSize = DEFAULT_PAGE_SIZE;
 
   $: currentAccount = accounts.find((account) => account.id === selectedAccount);
-  $: currentBalance = currentAccount?.currentBalance ?? balance.points.at(-1)?.balance ?? '0';
+  $: summaryAccount = currentAccount ?? (!selectedAccount && accounts.length === 1 ? accounts[0] : undefined);
+  $: currentBalance = summaryAccount?.currentBalance ?? balance.points.at(-1)?.balance ?? '0';
+  $: balanceBasis = summaryAccount?.balanceBasis ?? balance.basis;
+  $: balanceMetricLabel = balanceBasis === 'net_activity' ? 'Net activity' : 'Current balance';
+  $: balanceChartLabel = balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Running balance';
   $: latestCashflow = cashflow.points.at(-1);
+  $: latestCashflowLabel = latestCashflow
+    ? `${new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'UTC'
+      }).format(new Date(`${latestCashflow.period}T00:00:00Z`))} net spend`
+    : 'Latest net spend';
 
   function queryString(includePage = false) {
     const query = new URLSearchParams();
@@ -43,13 +63,19 @@
     if (direction) query.set('direction', direction);
     if (categoryId) query.set('categoryId', categoryId);
     if (sort !== 'booked_date_desc') query.set('sort', sort);
-    if (includePage && page > 1) query.set('page', String(page));
+    if (includePage) {
+      if (page > 1) query.set('page', String(page));
+      if (pageSize !== DEFAULT_PAGE_SIZE) query.set('pageSize', String(pageSize));
+    }
     const encoded = query.toString();
     return encoded ? `?${encoded}` : '';
   }
 
   async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { accept: 'application/json' } });
+    const response = await fetch(url, {
+      cache: 'no-store',
+      headers: { accept: 'application/json' }
+    });
     if (!response.ok) throw new Error(await apiMessage(response, 'Ledger data is temporarily unavailable.'));
     return response.json() as Promise<T>;
   }
@@ -77,7 +103,7 @@
       transactions = await fetchJson<TransactionPage>(`/api/transactions${queryString(true)}`);
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'Transactions are temporarily unavailable.';
-      transactions = { items: [], page, pageSize: 25, total: 0, totalPages: 0 };
+      transactions = { items: [], page, pageSize, total: 0, totalPages: 0 };
     } finally {
       loadingTransactions = false;
     }
@@ -91,7 +117,7 @@
       await Promise.all([loadAnalytics(), loadTransactions()]);
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'Ledger data is temporarily unavailable.';
-      balance = { currency: balance.currency, points: [] };
+      balance = { currency: balance.currency, basis: balance.basis, points: [] };
       cashflow = { currency: cashflow.currency, points: [] };
     } finally {
       loadingSummary = false;
@@ -121,7 +147,14 @@
   }
 
   async function changePage(next: number) {
-    page = next;
+    const lastPage = Math.max(transactions.totalPages, 1);
+    page = Math.min(Math.max(Math.trunc(next), 1), lastPage);
+    await loadTransactions();
+  }
+
+  async function changePageSize(next: number) {
+    pageSize = next;
+    page = 1;
     await loadTransactions();
   }
 
@@ -159,11 +192,11 @@
     </div>
     <div class="hero-metrics" aria-label="Ledger summary">
       <div>
-        <span>Current balance</span>
-        <strong>{loadingSummary ? '—' : money(currentBalance, currentAccount?.nativeCurrency ?? balance.currency)}</strong>
+        <span>{balanceMetricLabel}</span>
+        <strong>{loadingSummary ? '—' : money(currentBalance, summaryAccount?.nativeCurrency ?? balance.currency)}</strong>
       </div>
       <div>
-        <span>Latest net flow</span>
+        <span>{latestCashflowLabel}</span>
         <strong class:positive={Number(latestCashflow?.net ?? 0) >= 0}>
           {loadingSummary || !latestCashflow ? '—' : money(latestCashflow.net, cashflow.currency)}
         </strong>
@@ -197,11 +230,16 @@
       <div class="chart-heading">
         <div>
           <p>Daily position</p>
-          <h2>Running balance</h2>
+          <h2>{balanceChartLabel}</h2>
         </div>
         <span>{balance.currency}</span>
       </div>
-      <BalanceChart points={balance.points} currency={balance.currency} loading={loadingSummary} />
+      <BalanceChart
+        points={balance.points}
+        currency={balance.currency}
+        loading={loadingSummary}
+        label={balanceChartLabel}
+      />
     </article>
 
     <article class="chart-card">
@@ -228,6 +266,7 @@
     {sort}
     onFilter={applyFilters}
     onPage={changePage}
+    onPageSize={changePageSize}
   />
 </main>
 

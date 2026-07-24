@@ -43,6 +43,7 @@
           <strong>{money(account.currentBalance, account.nativeCurrency)}</strong>
           <span class="meta">
             {account.displayName}{account.accountRefMasked ? ` · ${account.accountRefMasked}` : ''}
+            · {account.balanceBasis === 'net_activity' ? 'Net activity' : 'Current balance'}
           </span>
         </button>
       {/each}

@@ -11,6 +11,7 @@ type AccountRow = {
   native_currency: string;
   account_ref_masked: string | null;
   current_balance: string;
+  balance_basis: 'balance' | 'net_activity';
   last_statement_date: string | null;
 };
 
@@ -28,6 +29,7 @@ export async function GET() {
           nativeCurrency: row.native_currency,
           accountRefMasked: row.account_ref_masked,
           currentBalance: row.current_balance,
+          balanceBasis: row.balance_basis,
           lastStatementDate: row.last_statement_date
         }))
       },

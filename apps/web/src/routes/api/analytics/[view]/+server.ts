@@ -9,7 +9,7 @@ import {
 } from '$lib/server/api.js';
 import { buildBalanceQuery, buildCashflowQuery, query } from '$lib/server/db.js';
 
-type BalanceRow = { date: string; balance: string };
+type BalanceRow = { date: string; balance: string; basis: 'balance' | 'net_activity' };
 type CashflowRow = { period: string; inflow: string; outflow: string; net: string };
 
 export async function GET({ params, url }) {
@@ -25,7 +25,11 @@ export async function GET({ params, url }) {
       const built = buildBalanceQuery(parsed.data);
       const result = await query<BalanceRow>(built.text, built.values);
       return json(
-        { currency, points: result.rows },
+        {
+          currency,
+          basis: result.rows[0]?.basis ?? 'net_activity',
+          points: result.rows.map(({ date, balance }) => ({ date, balance }))
+        },
         { headers: privateReadHeaders }
       );
     }

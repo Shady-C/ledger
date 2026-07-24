@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { balanceBasisSchema } from './account.js';
 import { currencyCodeSchema, decimalStringSchema, isoDateSchema } from './primitives.js';
 
 export const balancePointSchema = z.object({
@@ -9,6 +10,7 @@ export const balancePointSchema = z.object({
 
 export const balanceResponseSchema = z.object({
   currency: currencyCodeSchema,
+  basis: balanceBasisSchema,
   points: z.array(balancePointSchema)
 });
 

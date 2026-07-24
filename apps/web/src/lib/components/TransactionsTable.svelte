@@ -24,6 +24,7 @@
     sort: TransactionSort;
   }) => void = () => undefined;
   export let onPage: (page: number) => void = () => undefined;
+  export let onPageSize: (pageSize: number) => void = () => undefined;
 
   function submit() {
     onFilter({ search, accountId, categoryId, direction, sort });
@@ -91,11 +92,11 @@
     <table>
       <thead>
         <tr>
-          <th scope="col">Date</th>
+          <th scope="col">Processed date</th>
           <th scope="col">Description</th>
           <th scope="col">Category</th>
           <th scope="col" class="number">Amount</th>
-          <th scope="col" class="number">Running balance</th>
+          <th scope="col" class="number">End-of-day position</th>
         </tr>
       </thead>
       <tbody>
@@ -117,7 +118,12 @@
         {:else}
           {#each data.items as transaction}
             <tr>
-              <td class="date">{shortDate(transaction.bookedDate)}</td>
+              <td class="date">
+                <span>{shortDate(transaction.postedDate ?? transaction.bookedDate)}</span>
+                {#if transaction.postedDate && transaction.postedDate !== transaction.bookedDate}
+                  <small>Booked {shortDate(transaction.bookedDate)}</small>
+                {/if}
+              </td>
               <td>
                 <div class="description">
                   <strong>{transaction.merchantName ?? transaction.description}</strong>
@@ -136,10 +142,36 @@
     </table>
   </div>
 
-  {#if data.totalPages > 1}
+  {#if data.total > 0}
     <nav class="pagination" aria-label="Transaction pages">
       <button type="button" disabled={data.page <= 1 || loading} on:click={() => onPage(data.page - 1)}>Previous</button>
-      <span>Page {data.page} of {data.totalPages}</span>
+      <label>
+        <span>Page</span>
+        <select
+          aria-label="Go to transaction page"
+          value={data.page}
+          disabled={loading}
+          on:change={(event) => onPage(Number(event.currentTarget.value))}
+        >
+          {#each Array(data.totalPages) as _, index}
+            <option value={index + 1}>{index + 1}</option>
+          {/each}
+        </select>
+        <span>of {data.totalPages}</span>
+      </label>
+      <label>
+        <span>Rows</span>
+        <select
+          aria-label="Transactions per page"
+          value={data.pageSize}
+          disabled={loading}
+          on:change={(event) => onPageSize(Number(event.currentTarget.value))}
+        >
+          {#each [10, 25, 50, 100] as size}
+            <option value={size}>{size}</option>
+          {/each}
+        </select>
+      </label>
       <button type="button" disabled={data.page >= data.totalPages || loading} on:click={() => onPage(data.page + 1)}>Next</button>
     </nav>
   {/if}
@@ -250,6 +282,7 @@
   td { font-size: 0.75rem; }
   .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .date { color: var(--muted); white-space: nowrap; }
+  .date small { display: block; margin-top: 0.12rem; font-size: 0.62rem; }
   .description { display: grid; gap: 0.17rem; min-width: 220px; }
   .description strong { font-size: 0.77rem; }
   .description span { max-width: 42ch; overflow: hidden; color: var(--muted); font-size: 0.65rem; text-overflow: ellipsis; white-space: nowrap; }
@@ -280,13 +313,21 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 0.8rem;
     margin-top: 1rem;
     color: var(--muted);
     font-size: 0.72rem;
   }
 
-  .pagination button {
+  .pagination label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .pagination button,
+  .pagination select {
     padding: 0.45rem 0.7rem;
     color: var(--ink);
     border: 1px solid var(--line);
@@ -295,7 +336,9 @@
     font-size: 0.7rem;
     font-weight: 700;
   }
-  .pagination button:disabled { opacity: 0.45; }
+  .pagination select { padding-right: 1.7rem; }
+  .pagination button:disabled,
+  .pagination select:disabled { opacity: 0.45; }
 
   @keyframes pulse { to { opacity: 0.45; } }
 
