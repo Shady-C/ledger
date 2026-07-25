@@ -65,8 +65,10 @@ def test_postgres_persists_golden_close_at_2855_59(amex_workbook_bytes) -> None:
         institution_id = cursor.fetchone()[0]
         cursor.execute(
             """
-            INSERT INTO account (institution_id, display_name, kind, native_currency)
-            VALUES (%s, %s, 'credit_card', 'CAD')
+            INSERT INTO account (
+                institution_id, display_name, kind, native_currency, market_code
+            )
+            VALUES (%s, %s, 'credit_card', 'CAD', 'CA')
             RETURNING id::text
             """,
             (institution_id, f"Worker Test {unique}"),

@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 import psycopg
 from psycopg.rows import dict_row
 
-from worker.models import ParsedTransaction
+from worker.models import ParsedTransaction, normalize_base_currency
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +41,17 @@ class FXRateProvider(Protocol):
 
 class MissingFXRateError(RuntimeError):
     pass
+
+
+class StaleBaseCurrencyRefreshError(RuntimeError):
+    """An ordinary FX refresh targeted a currency that is no longer active."""
+
+    def __init__(self, *, requested: str, active: str) -> None:
+        self.requested = requested
+        self.active = active
+        super().__init__(
+            f"stale FX refresh requested {requested} while {active} is active"
+        )
 
 
 _RATE_QUANTUM = Decimal("0.00000001")
@@ -69,7 +80,15 @@ class FXRebuildRepository(Protocol):
 
     def list_fx_requirements(self, *, target_currency: str) -> tuple[FXRequirement, ...]: ...
 
-    def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int: ...
+    def rebuild_base_currency(
+        self,
+        *,
+        target_currency: str,
+        max_staleness_days: int,
+        allow_currency_change: bool = False,
+    ) -> int: ...
+
+    def enqueue_fx_refresh_job(self, *, target_base_currency: str) -> None: ...
 
     def enqueue_analytics_refresh_job(self, *, mode: str = "incremental") -> None: ...
 
@@ -80,9 +99,9 @@ def stamp_fx(
     base_currency: str = "CAD",
     provider: FXRateProvider | None = None,
 ) -> FxStamp:
-    """Stamp a row, using exact 1:1 arithmetic for Phase 0 CAD transactions."""
+    """Stamp a row, using exact 1:1 arithmetic in the active reporting currency."""
 
-    base = base_currency.upper()
+    base = normalize_base_currency(base_currency)
     native = transaction.currency_native.upper()
     if native == base:
         return FxStamp(
@@ -121,7 +140,7 @@ def pending_fx_stamp(*, base_currency: str = "CAD") -> FxStamp:
 
     return FxStamp(
         amount_base=None,
-        currency_base=_currency(base_currency),
+        currency_base=normalize_base_currency(base_currency),
         rate=None,
         rate_date=None,
         source="pending",
@@ -357,15 +376,48 @@ class FXRefreshService:
         self.provider = provider
 
     def run(self, payload: dict[str, object]) -> dict[str, object]:
+        return self._run(
+            payload,
+            allow_currency_change=False,
+            enqueue_analytics=True,
+        )
+
+    def run_for_currency_switch(self, *, target_currency: str) -> dict[str, object]:
+        """Refresh and rebuild while explicitly authorizing a home-currency change."""
+
+        return self._run(
+            {
+                "target_base_currency": target_currency,
+                "analytics_mode": "full",
+                "allow_pending": True,
+            },
+            allow_currency_change=True,
+            enqueue_analytics=False,
+        )
+
+    def _run(
+        self,
+        payload: dict[str, object],
+        *,
+        allow_currency_change: bool,
+        enqueue_analytics: bool,
+    ) -> dict[str, object]:
         target_value = payload.get(
             "target_base_currency",
             payload.get("base_currency", self.repository.get_base_currency()),
         )
         if not isinstance(target_value, str):
             raise ValueError("fx_refresh base_currency must be a string")
-        target = _currency(target_value)
-        if target != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+        target = normalize_base_currency(target_value)
+        analytics_mode = payload.get("analytics_mode", "incremental")
+        if analytics_mode not in {"full", "incremental"}:
+            raise ValueError("fx_refresh analytics_mode must be full or incremental")
+        allow_pending = payload.get("allow_pending", False)
+        if not isinstance(allow_pending, bool):
+            raise ValueError("fx_refresh allow_pending must be a boolean")
+        active = normalize_base_currency(self.repository.get_base_currency())
+        if target != active and not allow_currency_change:
+            return _stale_refresh_result(requested=target, active=active)
         requirements = self.repository.list_fx_requirements(target_currency=target)
         quote_currencies: set[str] = set()
         unavailable: list[FXRequirement] = []
@@ -385,21 +437,32 @@ class FXRefreshService:
         provider_staleness = getattr(self.provider, "max_staleness_days", 7)
         if not isinstance(provider_staleness, int):
             provider_staleness = 7
-        transactions_updated = self.repository.rebuild_base_currency(
-            target_currency=target,
-            max_staleness_days=provider_staleness,
-        )
-        self.repository.enqueue_analytics_refresh_job(mode="incremental")
-        if unavailable:
+        try:
+            transactions_updated = self.repository.rebuild_base_currency(
+                target_currency=target,
+                max_staleness_days=provider_staleness,
+                allow_currency_change=allow_currency_change,
+            )
+        except StaleBaseCurrencyRefreshError as error:
+            return _stale_refresh_result(
+                requested=error.requested,
+                active=error.active,
+            )
+        if enqueue_analytics:
+            self.repository.enqueue_analytics_refresh_job(mode=str(analytics_mode))
+        if unavailable and not allow_pending:
             raise MissingFXRateError(
                 f"{len(unavailable)} required FX rate(s) remain unavailable"
             )
-        return {
+        result: dict[str, object] = {
             "base_currency": target,
             "quote_currencies": sorted(quote_currencies),
             "rates_stored": rates_stored,
             "transactions_updated": transactions_updated,
         }
+        if unavailable:
+            result["unavailable_rate_count"] = len(unavailable)
+        return result
 
 
 class BaseCurrencyRebuildService:
@@ -420,21 +483,42 @@ class BaseCurrencyRebuildService:
         target_value = payload.get("target_base_currency", payload.get("base_currency"))
         if not isinstance(target_value, str):
             raise ValueError("base_currency_rebuild requires base_currency")
-        target = _currency(target_value)
-        if target != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+        target = normalize_base_currency(target_value)
         previous = self.repository.get_base_currency()
-        refreshed = self.refresh.run({"target_base_currency": target})
+        refreshed = self.refresh.run_for_currency_switch(target_currency=target)
         rebuilt_value = refreshed.get("transactions_updated")
         if not isinstance(rebuilt_value, int):
             raise TypeError("FX refresh returned an invalid transaction count")
         rebuilt = rebuilt_value
-        return {
+        unavailable_value = refreshed.get("unavailable_rate_count", 0)
+        if not isinstance(unavailable_value, int):
+            raise TypeError("FX refresh returned an invalid unavailable-rate count")
+        if previous != target or unavailable_value:
+            # Always rescan after an actual switch. Ingestion shares the switch
+            # lock, but it can commit after the pre-lock requirement snapshot;
+            # this follow-up prevents those newly pending rows being stranded.
+            self.repository.enqueue_fx_refresh_job(target_base_currency=target)
+        self.repository.enqueue_analytics_refresh_job(mode="full")
+        result: dict[str, object] = {
             "previous_base_currency": previous,
             "target_base_currency": target,
             "transactions_updated": rebuilt,
             "settings_updated": True,
         }
+        if unavailable_value:
+            result["pending_rate_count"] = unavailable_value
+        return result
+
+
+def _stale_refresh_result(*, requested: str, active: str) -> dict[str, object]:
+    return {
+        "base_currency": active,
+        "requested_base_currency": requested,
+        "stale": True,
+        "quote_currencies": [],
+        "rates_stored": 0,
+        "transactions_updated": 0,
+    }
 
 
 def _get_url(url: str, timeout_seconds: float) -> bytes:

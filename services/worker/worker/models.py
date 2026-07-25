@@ -6,11 +6,22 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from worker.money import normalize_money
+
+SUPPORTED_BASE_CURRENCIES: Final = frozenset({"CAD", "TZS"})
+
+
+def normalize_base_currency(value: str) -> str:
+    """Normalize an officially supported ledger reporting currency."""
+
+    code = value.strip().upper()
+    if code not in SUPPORTED_BASE_CURRENCIES:
+        raise ValueError("reporting currency must be CAD or TZS")
+    return code
 
 
 class Direction(StrEnum):
@@ -198,26 +209,25 @@ class CanonicalTransaction(ParsedTransaction):
     @field_validator("amount_base")
     @classmethod
     def normalize_base_amount(cls, value: Decimal | None) -> Decimal | None:
-        return normalize_money(value, field="CAD reporting amount") if value is not None else None
+        return normalize_money(value, field="reporting amount") if value is not None else None
 
     @field_validator("currency_base")
     @classmethod
-    def reporting_currency_is_fixed(cls, value: str) -> str:
-        code = value.strip().upper()
-        if code != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
-        return code
+    def reporting_currency_is_supported(cls, value: str) -> str:
+        return normalize_base_currency(value)
 
     @model_validator(mode="after")
     def validate_reporting_layer(self) -> CanonicalTransaction:
         valued = (self.amount_base, self.fx_rate, self.fx_rate_date)
-        if self.currency_native == "CAD":
+        if self.currency_native == self.currency_base:
             if (
                 self.amount_base != self.amount_native
                 or self.fx_rate != Decimal("1")
                 or self.fx_rate_date is None
             ):
-                raise ValueError("CAD-native transactions require an identity reporting valuation")
+                raise ValueError(
+                    "transactions native to the reporting currency require an identity valuation"
+                )
             return self
         if all(value is None for value in valued):
             return self
@@ -233,7 +243,7 @@ class CanonicalTransaction(ParsedTransaction):
             rounding=ROUND_HALF_UP,
         )
         if self.amount_base != expected_base:
-            raise ValueError("CAD reporting amount must equal posted amount times the FX rate")
+            raise ValueError("reporting amount must equal posted amount times the FX rate")
         staleness_days = (self.booked_date - self.fx_rate_date).days
         if not 0 <= staleness_days <= 7:
             raise ValueError("FX rate date must be booked date or at most seven prior days")

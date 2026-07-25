@@ -25,7 +25,13 @@ from worker.categorize import categorize
 from worker.column_mapping import AIColumnMappingService
 from worker.dedup import transaction_dedup_hash
 from worker.fx import FXRateProvider, MissingFXRateError, pending_fx_stamp, stamp_fx
-from worker.models import CanonicalTransaction, FileIngestResult, ParsedFile, ParseStatus
+from worker.models import (
+    CanonicalTransaction,
+    FileIngestResult,
+    ParsedFile,
+    ParseStatus,
+    normalize_base_currency,
+)
 from worker.reconcile import reconcile_statement
 from worker.repository import (
     BaseCurrencyChangedError,
@@ -96,9 +102,9 @@ class IngestionPipeline:
     ) -> None:
         self.store = store
         self.repository = repository
-        self.base_currency = base_currency.upper() if base_currency is not None else None
-        if self.base_currency is not None and self.base_currency != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+        self.base_currency = (
+            normalize_base_currency(base_currency) if base_currency is not None else None
+        )
         self.fx_provider = fx_provider
         self.registry = registry or AdapterRegistry()
         self.column_mapper = column_mapper
@@ -109,9 +115,9 @@ class IngestionPipeline:
     def process_file(self, *, account_id: str, file_key: str) -> FileIngestResult:
         account = self.repository.get_account_profile(account_id)
         account_kind = account.kind
-        base_currency = self.base_currency or self.repository.get_base_currency()
-        if base_currency != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+        base_currency = normalize_base_currency(
+            self.base_currency or self.repository.get_base_currency()
+        )
         content = self.store.read(file_key)
         file = ParsedFile(
             name=PurePosixPath(file_key).name,
@@ -155,7 +161,7 @@ class IngestionPipeline:
             except MissingFXRateError:
                 # Native statement truth is independently useful and reconciles
                 # without a reporting-currency quote. A refresh job can fill the
-                # nullable CAD layer later.
+                # nullable reporting layer later.
                 fx = pending_fx_stamp(base_currency=base_currency)
             category = categorize(row, account_kind=account_kind)
             enrichment = {
@@ -443,6 +449,8 @@ def _validate_service_payload(kind: str, payload: dict[str, object]) -> None:
         or not base_currency.strip().isalpha()
     ):
         raise ValueError(f"{kind} base_currency must be a three-letter code")
+    if isinstance(base_currency, str):
+        normalize_base_currency(base_currency)
 
 
 class _LeaseHeartbeat:

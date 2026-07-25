@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -17,15 +18,18 @@ from worker.ai_categorization import (
     CategoryOption,
     UnresolvedMerchantFlow,
 )
-from worker.fx import FXRequirement
+from worker.fx import FXRequirement, StaleBaseCurrencyRefreshError
 from worker.models import (
     AccountKind,
     CanonicalTransaction,
     CategorySource,
     FlowType,
     StatementMetadata,
+    normalize_base_currency,
 )
 from worker.reconcile import ReconciliationResult, StatementPeriod
+
+_FOLLOWUP_ENQUEUE_MAX_ATTEMPTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -658,28 +662,29 @@ class PostgresRepository(LedgerRepository, JobRepository):
             RETURNING id
         """
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(update, update_parameters)
-            if cursor.fetchone() is not None:
-                return
-            cursor.execute(
-                """
-                INSERT INTO job (kind, payload, deduplication_key)
-                VALUES (%s, %s, %s)
-                ON CONFLICT DO NOTHING
-                RETURNING id
-                """,
-                (kind, Jsonb(payload), deduplication_key),
-            )
-            if cursor.fetchone() is not None:
-                return
-            # A concurrent insert won the partial unique-index race. Mark that
-            # active job so an enqueue after its scan still forces one rerun.
-            cursor.execute(update, update_parameters)
-            if cursor.fetchone() is None:
-                raise RuntimeError(f"could not enqueue or coalesce {kind} job")
+            # The active-job partial index is the enqueue arbiter. A concurrent
+            # winner can finish after our INSERT conflicts but before the next
+            # UPDATE sees it, so retry that turnover window a bounded number of
+            # times instead of dropping the requested follow-up.
+            for _attempt in range(_FOLLOWUP_ENQUEUE_MAX_ATTEMPTS):
+                cursor.execute(update, update_parameters)
+                if cursor.fetchone() is not None:
+                    return
+                cursor.execute(
+                    """
+                    INSERT INTO job (kind, payload, deduplication_key)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """,
+                    (kind, Jsonb(payload), deduplication_key),
+                )
+                if cursor.fetchone() is not None:
+                    return
+        raise RuntimeError(f"could not enqueue or coalesce {kind} job")
 
     def list_fx_requirements(self, *, target_currency: str) -> tuple[FXRequirement, ...]:
-        target = _currency_code(target_currency)
+        target = normalize_base_currency(target_currency)
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -699,6 +704,10 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 FROM account
                 WHERE native_currency <> %s
                 UNION
+                SELECT base_currency AS base, %s AS quote, CURRENT_DATE AS as_of
+                FROM ledger_settings
+                WHERE singleton AND base_currency <> %s
+                UNION
                 SELECT DISTINCT
                     original_currency AS base,
                     currency_native AS quote,
@@ -709,43 +718,313 @@ class PostgresRepository(LedgerRepository, JobRepository):
                   AND original_currency <> currency_native
                 ORDER BY base, as_of
                 """,
-                (target, target, target, target, target, target, target, target),
+                (
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                ),
             ).fetchall()
         return tuple(
             FXRequirement(base=str(row["base"]), quote=str(row["quote"]), as_of=row["as_of"])
             for row in rows
         )
 
-    def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int:
-        target = _currency_code(target_currency)
-        if target != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
+    def rebuild_base_currency(
+        self,
+        *,
+        target_currency: str,
+        max_staleness_days: int,
+        allow_currency_change: bool = False,
+    ) -> int:
+        target = normalize_base_currency(target_currency)
         if not 0 <= max_staleness_days <= 7:
             raise ValueError("max_staleness_days must be between 0 and 7")
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext('ledger-base-currency'))")
+            cursor.execute(
+                "SELECT base_currency FROM ledger_settings WHERE singleton FOR UPDATE"
+            )
+            settings = cursor.fetchone()
+            if settings is None:
+                raise RuntimeError("ledger settings are not initialized")
+            previous = normalize_base_currency(str(settings["base_currency"]))
+            if previous != target and not allow_currency_change:
+                raise StaleBaseCurrencyRefreshError(
+                    requested=target,
+                    active=previous,
+                )
+
+            # The TZS materiality floors are frozen on first use from one dated
+            # CAD/TZS quote. Later switches reuse the persisted policy rather
+            # than drifting with the market.
+            if target == "TZS":
+                cursor.execute(
+                    """
+                    INSERT INTO analytics_threshold_profile (
+                        base_currency, policy_version,
+                        minimum_difference_low, minimum_difference_balanced,
+                        minimum_difference_high, minimum_price_increase,
+                        source_currency, source_rate, source_rate_date
+                    )
+                    SELECT
+                        'TZS', 'materiality-v1',
+                        round(profile.minimum_difference_low * rate.rate, 2),
+                        round(profile.minimum_difference_balanced * rate.rate, 2),
+                        round(profile.minimum_difference_high * rate.rate, 2),
+                        round(profile.minimum_price_increase * rate.rate, 2),
+                        'CAD', rate.rate, rate.as_of
+                    FROM analytics_threshold_profile AS profile
+                    CROSS JOIN LATERAL (
+                        SELECT cached.rate, cached.as_of
+                        FROM fx_rate AS cached
+                        WHERE cached.base = 'CAD'
+                          AND cached.quote = 'TZS'
+                          AND cached.as_of BETWEEN
+                              CURRENT_DATE - make_interval(days => %s)
+                              AND CURRENT_DATE
+                        ORDER BY cached.as_of DESC
+                        LIMIT 1
+                    ) AS rate
+                    WHERE profile.base_currency = 'CAD'
+                    ON CONFLICT (base_currency) DO NOTHING
+                    """,
+                    (max_staleness_days,),
+                )
+            cursor.execute(
+                """
+                SELECT policy_version
+                FROM analytics_threshold_profile
+                WHERE base_currency = %s
+                """,
+                (target,),
+            )
+            target_policy = cursor.fetchone()
+            if target_policy is None:
+                raise RuntimeError(
+                    f"analytics threshold profile for {target} could not be initialized"
+                )
+            target_policy_version = str(target_policy["policy_version"])
+
+            switch_rate: Decimal | None = None
+            if previous != target:
+                cursor.execute(
+                    """
+                    SELECT rate, as_of, source
+                    FROM fx_rate
+                    WHERE base = %s AND quote = %s
+                      AND as_of BETWEEN
+                          CURRENT_DATE - make_interval(days => %s)
+                          AND CURRENT_DATE
+                    ORDER BY as_of DESC
+                    LIMIT 1
+                    """,
+                    (previous, target, max_staleness_days),
+                )
+                switch_quote = cursor.fetchone()
+                if switch_quote is None:
+                    raise RuntimeError(
+                        f"a current {previous}/{target} rate is required to switch home currency"
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO home_currency_switch_audit (
+                        previous_currency, target_currency, conversion_rate,
+                        rate_source, rate_source_date,
+                        threshold_policy_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING conversion_rate
+                    """,
+                    (
+                        previous,
+                        target,
+                        switch_quote["rate"],
+                        switch_quote["source"],
+                        switch_quote["as_of"],
+                        target_policy_version,
+                    ),
+                )
+                switch_evidence = cursor.fetchone()
+                if switch_evidence is None:
+                    raise RuntimeError("home currency switch evidence was not recorded")
+                # Use the persisted numeric value for every override rewrite so
+                # the resulting amounts remain reconstructible from the audit.
+                switch_rate = Decimal(switch_evidence["conversion_rate"])
+
+            # The DB's deferred consistency guard permits settings-first
+            # mutation while ensuring no transaction can commit with a stale
+            # currency_base. Ingestion uses the same advisory lock.
+            cursor.execute(
+                """
+                UPDATE ledger_settings
+                SET base_currency = %s, updated_at = now()
+                WHERE singleton
+                """,
+                (target,),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("ledger settings are not initialized")
+            if previous != target:
+                if switch_rate is None:
+                    raise RuntimeError("home currency switch rate is missing")
+                cursor.execute(
+                    """
+                    UPDATE analytics_settings
+                    SET published_generation = NULL, updated_at = now()
+                    WHERE singleton
+                    """
+                )
+                cursor.execute(
+                    """
+                    UPDATE recurring_occurrence AS occurrence
+                    SET comparison_amount = round(occurrence.comparison_amount * %s, 2),
+                        comparison_currency = %s
+                    FROM recurring_series AS series
+                    WHERE series.id = occurrence.series_id
+                      AND series.comparison_basis = 'base'
+                      AND series.comparison_currency = %s
+                      AND occurrence.comparison_basis = 'base'
+                    """,
+                    (switch_rate, target, previous),
+                )
+                cursor.execute(
+                    """
+                    UPDATE recurring_series
+                    SET detected_expected_amount = round(
+                            detected_expected_amount * %s,
+                            2
+                        ),
+                        expected_amount_override = CASE
+                            WHEN expected_amount_override IS NULL THEN NULL
+                            ELSE round(expected_amount_override * %s, 2)
+                        END,
+                        comparison_currency = %s,
+                        detector_fingerprint = encode(
+                            sha256(convert_to(
+                                concat_ws(
+                                    chr(31),
+                                    market_scope,
+                                    'recurring',
+                                    merchant_key,
+                                    flow_type,
+                                    comparison_basis,
+                                    %s::text,
+                                    %s::text
+                                ),
+                                'UTF8'
+                            )),
+                            'hex'
+                        ),
+                        updated_at = now()
+                    WHERE comparison_basis = 'base'
+                      AND comparison_currency = %s
+                    """,
+                    (
+                        switch_rate,
+                        switch_rate,
+                        target,
+                        target,
+                        target_policy_version,
+                        previous,
+                    ),
+                )
+                # Recurring-overdue is cadence evidence, so preserve its row
+                # and review state while following the transformed series
+                # identity. Reporting-valued recurring price increases are
+                # resolved below and regenerated under the target policy.
+                cursor.execute(
+                    """
+                    UPDATE insight_finding AS finding
+                    SET detector_fingerprint = encode(
+                            sha256(convert_to(
+                                concat_ws(
+                                    chr(31),
+                                    finding.market_scope,
+                                    encode(
+                                        sha256(convert_to(
+                                            concat_ws(
+                                                chr(31),
+                                                'recurring_overdue',
+                                                series.detector_fingerprint,
+                                                finding.evidence ->> 'expectedNextDate'
+                                            ),
+                                            'UTF8'
+                                        )),
+                                        'hex'
+                                    )
+                                ),
+                                'UTF8'
+                            )),
+                            'hex'
+                        ),
+                        evidence = jsonb_set(
+                            jsonb_set(
+                                finding.evidence,
+                                '{baseCurrency}',
+                                to_jsonb(%s::text),
+                                true
+                            ),
+                            '{thresholdPolicyVersion}',
+                            to_jsonb(%s::text),
+                            true
+                        ),
+                        updated_at = now()
+                    FROM recurring_series AS series
+                    WHERE finding.recurring_series_id = series.id
+                      AND finding.finding_type = 'recurring_overdue'
+                      AND series.comparison_basis = 'base'
+                      AND series.comparison_currency = %s
+                      AND NULLIF(
+                          finding.evidence ->> 'expectedNextDate',
+                          ''
+                      ) IS NOT NULL
+                    """,
+                    (target, target_policy_version, target),
+                )
+                cursor.execute(
+                    """
+                    UPDATE insight_finding
+                    SET status = 'resolved', resolved_at = now(), updated_at = now()
+                    WHERE status <> 'resolved'
+                      AND finding_type = ANY(%s)
+                    """,
+                    (
+                        [
+                            "unusual_amount",
+                            "monthly_spike",
+                            "recurring_price_increase",
+                            "pending_fx",
+                        ],
+                    ),
+                )
             cursor.execute(
                 """
                 WITH valuation AS (
                     SELECT
                         txn.id,
                         CASE
-                            WHEN txn.currency_native = 'CAD' THEN 1
-                            ELSE COALESCE(rate.rate, txn.fx_rate)
+                            WHEN txn.currency_native = %s THEN 1
+                            ELSE rate.rate
                         END AS rate,
                         CASE
-                            WHEN txn.currency_native = 'CAD' THEN txn.booked_date
-                            ELSE COALESCE(rate.as_of, txn.fx_rate_date)
+                            WHEN txn.currency_native = %s THEN txn.booked_date
+                            ELSE rate.as_of
                         END AS rate_date,
                         CASE
-                            WHEN txn.currency_native = 'CAD' THEN 'identity'
-                            ELSE COALESCE(rate.source, txn.enrichment ->> 'fx_source')
+                            WHEN txn.currency_native = %s THEN 'identity'
+                            ELSE rate.source
                         END AS source,
                         CASE
-                            WHEN txn.currency_native = 'CAD' THEN txn.amount_native
+                            WHEN txn.currency_native = %s THEN txn.amount_native
                             WHEN rate.rate IS NOT NULL
                                 THEN round(txn.amount_native * rate.rate, 2)
-                            ELSE txn.amount_base
+                            ELSE NULL
                         END AS amount_base
                     FROM txn
                     LEFT JOIN LATERAL (
@@ -762,7 +1041,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
                 )
                 UPDATE txn
                 SET amount_base = valuation.amount_base,
-                    currency_base = 'CAD',
+                    currency_base = %s,
                     fx_rate = valuation.rate,
                     fx_rate_date = valuation.rate_date,
                     enrichment = CASE
@@ -785,7 +1064,7 @@ class PostgresRepository(LedgerRepository, JobRepository):
                       txn.enrichment
                   ) IS DISTINCT FROM (
                       valuation.amount_base,
-                      'CAD'::text,
+                      %s::text,
                       valuation.rate,
                       valuation.rate_date,
                       CASE
@@ -799,19 +1078,19 @@ class PostgresRepository(LedgerRepository, JobRepository):
                       END
                   )
                 """,
-                (target, max_staleness_days, target),
+                (
+                    target,
+                    target,
+                    target,
+                    target,
+                    target,
+                    max_staleness_days,
+                    target,
+                    target,
+                    target,
+                ),
             )
             rebuilt = cursor.rowcount
-            cursor.execute(
-                """
-                UPDATE ledger_settings
-                SET base_currency = %s, updated_at = now()
-                WHERE singleton
-                """,
-                ("CAD",),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("ledger settings are not initialized")
         return rebuilt
 
     def persist_statement(
@@ -1321,7 +1600,7 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         self.account_currencies = dict(account_currencies or {})
         self.account_refs = dict(account_refs or {})
         self.default_account_kind = default_account_kind
-        self.base_currency = base_currency
+        self.base_currency = normalize_base_currency(base_currency)
         self.adapter_mappings: dict[tuple[str, str, str], dict[str, object]] = {}
         self.categories: list[CategoryOption] = []
         self.unresolved_merchant_flows: list[UnresolvedMerchantFlow] = []
@@ -1589,19 +1868,20 @@ class InMemoryRepository(LedgerRepository, JobRepository):
         return False
 
     def list_fx_requirements(self, *, target_currency: str) -> tuple[FXRequirement, ...]:
+        target = normalize_base_currency(target_currency)
         requirements = {
-            FXRequirement(row.currency_native, target_currency, row.booked_date)
+            FXRequirement(row.currency_native, target, row.booked_date)
             for row in self.transactions.values()
-            if row.currency_native != target_currency
+            if row.currency_native != target
         }
         for statement in self.statements.values():
-            if statement.metadata.currency == target_currency:
+            if statement.metadata.currency == target:
                 continue
             if statement.metadata.opening_balance is not None:
                 requirements.add(
                     FXRequirement(
                         statement.metadata.currency,
-                        target_currency,
+                        target,
                         statement.period.start,
                     )
                 )
@@ -1609,15 +1889,19 @@ class InMemoryRepository(LedgerRepository, JobRepository):
                 requirements.add(
                     FXRequirement(
                         statement.metadata.currency,
-                        target_currency,
+                        target,
                         statement.period.end,
                     )
                 )
         requirements.update(
-            FXRequirement(currency, target_currency, datetime.now(UTC).date())
+            FXRequirement(currency, target, datetime.now(UTC).date())
             for currency in self.account_currencies.values()
-            if currency != target_currency
+            if currency != target
         )
+        if self.base_currency != target:
+            requirements.add(
+                FXRequirement(self.base_currency, target, datetime.now(UTC).date())
+            )
         for row in self.transactions.values():
             if (
                 row.original_currency is not None
@@ -1633,12 +1917,38 @@ class InMemoryRepository(LedgerRepository, JobRepository):
                 )
         return tuple(sorted(requirements, key=lambda item: (item.base, item.quote, item.as_of)))
 
-    def rebuild_base_currency(self, *, target_currency: str, max_staleness_days: int) -> int:
-        del max_staleness_days
-        target = _currency_code(target_currency)
-        if target != "CAD":
-            raise ValueError("Phase 2 reporting currency is fixed to CAD")
-        self.base_currency = "CAD"
+    def rebuild_base_currency(
+        self,
+        *,
+        target_currency: str,
+        max_staleness_days: int,
+        allow_currency_change: bool = False,
+    ) -> int:
+        if not 0 <= max_staleness_days <= 7:
+            raise ValueError("max_staleness_days must be between 0 and 7")
+        target = normalize_base_currency(target_currency)
+        if self.base_currency != target and not allow_currency_change:
+            raise StaleBaseCurrencyRefreshError(
+                requested=target,
+                active=self.base_currency,
+            )
+        self.base_currency = target
+        for key, transaction in tuple(self.transactions.items()):
+            identity = transaction.currency_native == target
+            enrichment = dict(transaction.enrichment)
+            if identity:
+                enrichment["fx_source"] = "identity"
+            else:
+                enrichment.pop("fx_source", None)
+            self.transactions[key] = transaction.model_copy(
+                update={
+                    "amount_base": transaction.amount_native if identity else None,
+                    "currency_base": target,
+                    "fx_rate": Decimal("1") if identity else None,
+                    "fx_rate_date": transaction.booked_date if identity else None,
+                    "enrichment": enrichment,
+                }
+            )
         return len(self.transactions)
 
     def expire_lease_for_test(self, job_id: str) -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
@@ -47,6 +47,14 @@ class AggregateDimension(StrEnum):
     ACCOUNT = "account"
     CATEGORY = "category"
     MERCHANT = "merchant"
+
+
+class MarketScope(StrEnum):
+    """Materialized account-market lens; ALL also contains unassigned accounts."""
+
+    ALL = "ALL"
+    CANADA = "CA"
+    TANZANIA = "TZ"
 
 
 class ComparisonBasis(StrEnum):
@@ -111,6 +119,7 @@ class AnalyticsTransaction:
     fx_fee_amount_native: Decimal | None = None
     direction: str | None = None
     is_reversal: bool = False
+    market_code: str | None = None
 
     def __post_init__(self) -> None:
         if not self.transaction_id.strip():
@@ -135,6 +144,11 @@ class AnalyticsTransaction:
         if self.direction is not None:
             normalized_direction = self.direction.strip().casefold()
             object.__setattr__(self, "direction", normalized_direction or None)
+        if self.market_code is not None:
+            normalized_market = self.market_code.strip().upper()
+            if normalized_market not in {MarketScope.CANADA, MarketScope.TANZANIA}:
+                raise ValueError("market_code must be CA or TZ")
+            object.__setattr__(self, "market_code", normalized_market)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +185,8 @@ class MonthlyAggregate:
     pending_fx_count: int
     pending_fx_by_currency: tuple[tuple[str, int], ...]
     coverage_status: CoverageStatus
+    market_scope: MarketScope = MarketScope.ALL
+    currency_base: str = "CAD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +213,7 @@ class RecurringSeriesCandidate:
     interval_stability: Decimal
     amount_stability: Decimal
     confidence: Decimal
+    market_scope: MarketScope = MarketScope.ALL
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +289,63 @@ class InsightFindingCandidate:
     account_id: str | None = None
     transaction_id: str | None = None
     recurring_series_fingerprint: str | None = None
+    market_scope: MarketScope = MarketScope.ALL
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsThresholdProfile:
+    """Frozen base-currency materiality values used by one analytics run."""
+
+    base_currency: str
+    policy_version: str
+    minimum_difference_low: Decimal
+    minimum_difference_balanced: Decimal
+    minimum_difference_high: Decimal
+    minimum_price_increase: Decimal
+
+    def __post_init__(self) -> None:
+        normalized_currency = self.base_currency.strip().upper()
+        object.__setattr__(self, "base_currency", normalized_currency)
+        if normalized_currency not in {"CAD", "TZS"}:
+            raise ValueError("analytics base currency must be CAD or TZS")
+        if not self.policy_version.strip():
+            raise ValueError("threshold policy version must not be blank")
+        for field_name in (
+            "minimum_difference_low",
+            "minimum_difference_balanced",
+            "minimum_difference_high",
+            "minimum_price_increase",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, Decimal):
+                raise TypeError(f"{field_name} must be a Decimal")
+            if not value.is_finite() or value != value.quantize(MONEY_QUANTUM):
+                raise ValueError(f"{field_name} must be finite money")
+            if value <= 0:
+                raise ValueError(f"{field_name} must be positive")
+        if not (
+            self.minimum_difference_low
+            >= self.minimum_difference_balanced
+            >= self.minimum_difference_high
+        ):
+            raise ValueError("threshold amount floors must decrease with sensitivity")
+
+    def amount_floor(self, sensitivity: Sensitivity) -> Decimal:
+        return {
+            Sensitivity.LOW: self.minimum_difference_low,
+            Sensitivity.BALANCED: self.minimum_difference_balanced,
+            Sensitivity.HIGH: self.minimum_difference_high,
+        }[sensitivity]
+
+
+CAD_THRESHOLD_PROFILE = AnalyticsThresholdProfile(
+    base_currency="CAD",
+    policy_version="materiality-v1",
+    minimum_difference_low=Decimal("25.00"),
+    minimum_difference_balanced=Decimal("10.00"),
+    minimum_difference_high=Decimal("5.00"),
+    minimum_price_increase=Decimal("1.00"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +355,16 @@ class AnalyticsRunContext:
     mode: str
     sensitivity: Sensitivity
     source_watermark: datetime | None
+    base_currency: str = "CAD"
+    threshold_profile: AnalyticsThresholdProfile = CAD_THRESHOLD_PROFILE
+
+    def __post_init__(self) -> None:
+        normalized = _currency(self.base_currency)
+        if normalized not in {"CAD", "TZS"}:
+            raise ValueError("analytics base currency must be CAD or TZS")
+        if self.threshold_profile.base_currency != normalized:
+            raise ValueError("analytics threshold profile currency must match the run")
+        object.__setattr__(self, "base_currency", normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +374,7 @@ class RecurringReviewState:
     cadence_override: RecurringCadence | None = None
     expected_amount_override: Decimal | None = None
     next_date_override: date | None = None
+    market_scope: MarketScope = MarketScope.ALL
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,6 +477,22 @@ _SENSITIVITY: dict[Sensitivity, _SensitivityProfile] = {
 }
 
 
+def _sensitivity_profile(
+    sensitivity: Sensitivity,
+    threshold_profile: AnalyticsThresholdProfile | None = None,
+) -> _SensitivityProfile:
+    defaults = _SENSITIVITY[sensitivity]
+    return _SensitivityProfile(
+        modified_z_threshold=defaults.modified_z_threshold,
+        minimum_difference_base=(
+            threshold_profile.amount_floor(sensitivity)
+            if threshold_profile is not None
+            else defaults.minimum_difference_base
+        ),
+        iqr_multiplier=defaults.iqr_multiplier,
+    )
+
+
 _CADENCE_RANGES: dict[RecurringCadence, tuple[int, int]] = {
     RecurringCadence.WEEKLY: (5, 9),
     RecurringCadence.BIWEEKLY: (12, 16),
@@ -412,7 +513,7 @@ _CADENCE_TYPICAL_DAYS: dict[RecurringCadence, int] = {
 def calculate_monthly_trends(
     transactions: Iterable[AnalyticsTransaction],
 ) -> tuple[MonthlyTrend, ...]:
-    """Return gap-filled CAD ledger trends with explicit FX coverage metadata."""
+    """Return gap-filled reporting-currency trends with explicit FX coverage metadata."""
 
     rows = tuple(transactions)
     if not rows:
@@ -491,6 +592,9 @@ def calculate_monthly_trends(
 
 def calculate_monthly_aggregates(
     transactions: Iterable[AnalyticsTransaction],
+    *,
+    market_scope: MarketScope = MarketScope.ALL,
+    base_currency: str = "CAD",
 ) -> tuple[MonthlyAggregate, ...]:
     """Build materializable ledger/account/category/merchant monthly rows."""
 
@@ -550,6 +654,8 @@ def calculate_monthly_aggregates(
                 pending_fx_count=pending_count,
                 pending_fx_by_currency=pending_by_currency,
                 coverage_status=coverage,
+                market_scope=market_scope,
+                currency_base=_currency(base_currency),
             )
         )
     return tuple(results)
@@ -559,8 +665,16 @@ def detect_recurring_series(
     transactions: Iterable[AnalyticsTransaction],
     *,
     as_of: date | None = None,
+    market_scope: MarketScope = MarketScope.ALL,
+    base_currency: str = "CAD",
+    threshold_policy_version: str = "materiality-v1",
 ) -> tuple[RecurringSeriesCandidate, ...]:
     """Detect stable weekly through annual merchant-and-flow series."""
+
+    reporting_currency = _currency(base_currency)
+    policy_version = threshold_policy_version.strip()
+    if not policy_version:
+        raise ValueError("threshold_policy_version cannot be blank")
 
     groups: dict[tuple[str, AnalyticsFlow], list[AnalyticsTransaction]] = defaultdict(list)
     for transaction in transactions:
@@ -592,7 +706,7 @@ def detect_recurring_series(
         if cadence is not RecurringCadence.ANNUAL and len(ordered) < 3:
             continue
 
-        comparison = _comparison_values(ordered)
+        comparison = _comparison_values(ordered, base_currency=reporting_currency)
         if comparison is None:
             continue
         basis, currency, occurrences = comparison
@@ -608,13 +722,18 @@ def detect_recurring_series(
         expected_days = int(median_interval.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         expected_next_date = ordered[-1].booked_date + timedelta(days=expected_days)
         evaluation_date = as_of if as_of is not None else date.today()
-        fingerprint = _fingerprint(
+        fingerprint_parts = [
+            market_scope.value,
             "recurring",
             merchant_key,
             flow_type.value,
             basis.value,
-            currency,
-        )
+        ]
+        if basis is ComparisonBasis.BASE:
+            fingerprint_parts.extend([reporting_currency, policy_version])
+        else:
+            fingerprint_parts.append(currency)
+        fingerprint = _fingerprint(*fingerprint_parts)
         confidence = (
             interval_stability * Decimal("0.55")
             + amount_stability * Decimal("0.25")
@@ -637,6 +756,7 @@ def detect_recurring_series(
                 interval_stability=interval_stability,
                 amount_stability=amount_stability,
                 confidence=confidence,
+                market_scope=market_scope,
             )
         )
     return tuple(candidates)
@@ -649,6 +769,7 @@ def detect_price_increases(
     percent_threshold: Decimal = Decimal("5"),
     minimum_base_increase: Decimal = Decimal("1.00"),
     minimum_increase_by_currency: Mapping[str, Decimal] | None = None,
+    base_currency: str = "CAD",
 ) -> tuple[PriceIncrease, ...]:
     """Compare the latest recurring price with a prior stable median."""
 
@@ -700,12 +821,13 @@ def detect_price_increases(
             if increase_base < minimum_base_increase:
                 continue
         else:
-            if candidate.comparison_currency == "CAD":
-                minimum = currency_minimums.get("CAD", minimum_base_increase)
+            normalized_base = _currency(base_currency)
+            if candidate.comparison_currency == normalized_base:
+                minimum = currency_minimums.get(normalized_base, minimum_base_increase)
             elif candidate.comparison_currency in currency_minimums:
                 minimum = currency_minimums[candidate.comparison_currency]
             else:
-                # A native threshold cannot be called CAD-equivalent without a
+                # A native threshold cannot be called home-currency-equivalent without a
                 # current valuation or an explicit currency-specific materiality.
                 continue
             if increase < minimum:
@@ -731,12 +853,13 @@ def detect_amount_anomalies(
     *,
     sensitivity: Sensitivity = Sensitivity.BALANCED,
     minimum_prior_observations: int = 5,
+    threshold_profile: AnalyticsThresholdProfile | None = None,
 ) -> tuple[AmountAnomaly, ...]:
     """Detect merchant-and-flow amount outliers using historical observations only."""
 
     if minimum_prior_observations < 2:
         raise ValueError("minimum_prior_observations must be at least two")
-    profile = _SENSITIVITY[sensitivity]
+    profile = _sensitivity_profile(sensitivity, threshold_profile)
     groups: dict[tuple[str, AnalyticsFlow], list[AnalyticsTransaction]] = defaultdict(list)
     for transaction in transactions:
         if (
@@ -844,6 +967,7 @@ def detect_monthly_spikes(
     as_of: date,
     sensitivity: Sensitivity = Sensitivity.BALANCED,
     minimum_prior_months: int = 5,
+    threshold_profile: AnalyticsThresholdProfile | None = None,
 ) -> tuple[MonthlySpike, ...]:
     """Detect high category and merchant spend using complete valued prior months."""
 
@@ -870,7 +994,7 @@ def detect_monthly_spikes(
             accumulator = grouped[dimension].setdefault(period_start, _MonthAccumulator())
             accumulator.add(transaction)
 
-    profile = _SENSITIVITY[sensitivity]
+    profile = _sensitivity_profile(sensitivity, threshold_profile)
     spikes: list[MonthlySpike] = []
     for (dimension_type, dimension_key), months in sorted(
         grouped.items(), key=lambda item: (item[0][0].value, item[0][1])
@@ -975,6 +1099,55 @@ def detect_near_duplicates(
     return tuple(duplicates)
 
 
+def _transactions_for_scope(
+    transactions: Sequence[AnalyticsTransaction],
+    market_scope: MarketScope,
+) -> tuple[AnalyticsTransaction, ...]:
+    if market_scope is MarketScope.ALL:
+        return tuple(transactions)
+    return tuple(
+        transaction
+        for transaction in transactions
+        if transaction.market_code == market_scope.value
+    )
+
+
+_BASE_SENSITIVE_FINDINGS = frozenset(
+    {
+        FindingType.UNUSUAL_AMOUNT,
+        FindingType.MONTHLY_SPIKE,
+        FindingType.RECURRING_PRICE_INCREASE,
+        FindingType.PENDING_FX,
+    }
+)
+
+
+def _finalize_finding(
+    finding: InsightFindingCandidate,
+    *,
+    market_scope: MarketScope,
+    context: AnalyticsRunContext,
+) -> InsightFindingCandidate:
+    fingerprint_parts = [market_scope.value]
+    if finding.finding_type in _BASE_SENSITIVE_FINDINGS:
+        fingerprint_parts.extend(
+            [context.base_currency, context.threshold_profile.policy_version]
+        )
+    fingerprint_parts.append(finding.detector_fingerprint)
+    evidence = {
+        **finding.evidence,
+        "marketScope": market_scope.value,
+        "baseCurrency": context.base_currency,
+        "thresholdPolicyVersion": context.threshold_profile.policy_version,
+    }
+    return replace(
+        finding,
+        detector_fingerprint=_fingerprint(*fingerprint_parts),
+        evidence=evidence,
+        market_scope=market_scope,
+    )
+
+
 class AnalyticsRefreshService:
     """Callable ``analytics_refresh`` job handler."""
 
@@ -996,23 +1169,70 @@ class AnalyticsRefreshService:
         try:
             snapshot = self.repository.prepare_run(mode=mode, run_id=requested_run_id)
             analysis_date = self.today()
-            aggregate_transactions = (
+            aggregate_source = (
                 snapshot.aggregate_transactions
                 if snapshot.aggregate_transactions is not None
                 else snapshot.transactions
             )
-            aggregates = tuple(
-                aggregate
-                for aggregate in calculate_monthly_aggregates(aggregate_transactions)
-                if not snapshot.affected_periods
-                or aggregate.period_start in snapshot.affected_periods
-            )
-            recurring = detect_recurring_series(snapshot.transactions, as_of=analysis_date)
-            findings = build_insight_findings(
-                snapshot,
-                recurring_series=recurring,
-                as_of=analysis_date,
-            )
+            aggregates: list[MonthlyAggregate] = []
+            recurring: list[RecurringSeriesCandidate] = []
+            findings: list[InsightFindingCandidate] = []
+            scope_counts: dict[str, dict[str, int]] = {}
+            for market_scope in MarketScope:
+                scoped_transactions = _transactions_for_scope(
+                    snapshot.transactions, market_scope
+                )
+                scoped_aggregate_transactions = _transactions_for_scope(
+                    aggregate_source, market_scope
+                )
+                scoped_aggregates = tuple(
+                    aggregate
+                    for aggregate in calculate_monthly_aggregates(
+                        scoped_aggregate_transactions,
+                        market_scope=market_scope,
+                        base_currency=snapshot.context.base_currency,
+                    )
+                    if not snapshot.affected_periods
+                    or aggregate.period_start in snapshot.affected_periods
+                )
+                scoped_recurring = detect_recurring_series(
+                    scoped_transactions,
+                    as_of=analysis_date,
+                    market_scope=market_scope,
+                    base_currency=snapshot.context.base_currency,
+                    threshold_policy_version=(
+                        snapshot.context.threshold_profile.policy_version
+                    ),
+                )
+                scoped_snapshot = replace(
+                    snapshot,
+                    transactions=scoped_transactions,
+                    aggregate_transactions=scoped_aggregate_transactions,
+                    source_findings=tuple(
+                        finding
+                        for finding in snapshot.source_findings
+                        if finding.market_scope is market_scope
+                    ),
+                    recurring_review_states=tuple(
+                        state
+                        for state in snapshot.recurring_review_states
+                        if state.market_scope is market_scope
+                    ),
+                )
+                scoped_findings = build_insight_findings(
+                    scoped_snapshot,
+                    recurring_series=scoped_recurring,
+                    as_of=analysis_date,
+                    market_scope=market_scope,
+                )
+                aggregates.extend(scoped_aggregates)
+                recurring.extend(scoped_recurring)
+                findings.extend(scoped_findings)
+                scope_counts[market_scope.value] = {
+                    "aggregate_count": len(scoped_aggregates),
+                    "recurring_series_count": len(scoped_recurring),
+                    "finding_count": len(scoped_findings),
+                }
             duration_ms = max(0, int((self.clock() - started) * 1000))
             result: dict[str, object] = {
                 "generation": snapshot.context.generation,
@@ -1025,6 +1245,11 @@ class AnalyticsRefreshService:
                 "aggregate_count": len(aggregates),
                 "recurring_series_count": len(recurring),
                 "finding_count": len(findings),
+                "base_currency": snapshot.context.base_currency,
+                "threshold_policy_version": (
+                    snapshot.context.threshold_profile.policy_version
+                ),
+                "market_scopes": scope_counts,
                 "duration_ms": duration_ms,
                 "affected_periods": [
                     period.isoformat() for period in snapshot.affected_periods
@@ -1032,9 +1257,9 @@ class AnalyticsRefreshService:
             }
             self.repository.publish_run(
                 snapshot=snapshot,
-                aggregates=aggregates,
-                recurring_series=recurring,
-                findings=findings,
+                aggregates=tuple(aggregates),
+                recurring_series=tuple(recurring),
+                findings=tuple(findings),
                 result=result,
             )
             return result
@@ -1061,6 +1286,7 @@ def build_insight_findings(
     *,
     recurring_series: Sequence[RecurringSeriesCandidate],
     as_of: date,
+    market_scope: MarketScope = MarketScope.ALL,
 ) -> tuple[InsightFindingCandidate, ...]:
     """Build the finding types currently owned by the deterministic worker."""
 
@@ -1078,10 +1304,14 @@ def build_insight_findings(
         for fingerprint, state in review_by_fingerprint.items()
         if state.status in {"cancelled", "ignored"}
     }
-    sensitivity_profile = _SENSITIVITY[snapshot.context.sensitivity]
+    sensitivity_profile = _sensitivity_profile(
+        snapshot.context.sensitivity,
+        snapshot.context.threshold_profile,
+    )
     for amount_anomaly in detect_amount_anomalies(
         snapshot.transactions,
         sensitivity=snapshot.context.sensitivity,
+        threshold_profile=snapshot.context.threshold_profile,
     ):
         transaction = transactions[amount_anomaly.transaction_id]
         fingerprint = _fingerprint(
@@ -1108,7 +1338,7 @@ def build_insight_findings(
                     str(amount_anomaly.score) if amount_anomaly.score is not None else None
                 ),
                 "priorObservationCount": amount_anomaly.prior_observation_count,
-                "comparisonBasis": "CAD reporting amount magnitude",
+                "comparisonBasis": "home-currency reporting amount magnitude",
                 "modifiedZThreshold": str(sensitivity_profile.modified_z_threshold),
                 "iqrMultiplier": str(sensitivity_profile.iqr_multiplier),
                 "minimumDifferenceBase": str(
@@ -1174,6 +1404,7 @@ def build_insight_findings(
         snapshot.transactions,
         as_of=as_of,
         sensitivity=snapshot.context.sensitivity,
+        threshold_profile=snapshot.context.threshold_profile,
     ):
         fingerprint = _fingerprint(
             FindingType.MONTHLY_SPIKE.value,
@@ -1198,7 +1429,7 @@ def build_insight_findings(
                 "method": spike.method.value,
                 "score": str(spike.score) if spike.score is not None else None,
                 "priorMonthCount": spike.prior_month_count,
-                "comparisonBasis": "complete valued CAD calendar months",
+                "comparisonBasis": "complete valued home-currency calendar months",
                 "modifiedZThreshold": str(sensitivity_profile.modified_z_threshold),
                 "iqrMultiplier": str(sensitivity_profile.iqr_multiplier),
                 "minimumDifferenceBase": str(
@@ -1243,6 +1474,8 @@ def build_insight_findings(
             for fingerprint, state in review_by_fingerprint.items()
             if state.status == "confirmed"
         },
+        minimum_base_increase=snapshot.context.threshold_profile.minimum_price_increase,
+        base_currency=snapshot.context.base_currency,
     ):
         review = review_by_fingerprint.get(increase.series_fingerprint)
         if (
@@ -1277,7 +1510,9 @@ def build_insight_findings(
                     str(increase.increase_base) if increase.increase_base is not None else None
                 ),
                 "percentThreshold": "5",
-                "minimumIncreaseBase": "1.00",
+                "minimumIncreaseBase": str(
+                    snapshot.context.threshold_profile.minimum_price_increase
+                ),
                 "formula": "(latestAmount - previousMedian) / previousMedian * 100",
             },
         )
@@ -1336,7 +1571,7 @@ def build_insight_findings(
             detector_fingerprint=fingerprint,
             finding_type=FindingType.PENDING_FX,
             severity=FindingSeverity.INFO,
-            headline="CAD valuation is pending",
+            headline=f"{snapshot.context.base_currency} valuation is pending",
             account_id=transaction.account_id,
             transaction_id=transaction.transaction_id,
             evidence={
@@ -1345,7 +1580,14 @@ def build_insight_findings(
                 "currencyNative": transaction.currency_native,
             },
         )
-    return tuple(findings[key] for key in sorted(findings))
+    return tuple(
+        _finalize_finding(
+            findings[key],
+            market_scope=market_scope,
+            context=snapshot.context,
+        )
+        for key in sorted(findings)
+    )
 
 
 class PostgresAnalyticsRepository:
@@ -1369,22 +1611,46 @@ class PostgresAnalyticsRepository:
             cursor.execute(
                 """
                 SELECT settings.sensitivity, settings.published_generation,
-                       published.source_watermark AS previous_watermark
+                       published.source_watermark AS previous_watermark,
+                       published.base_currency AS previous_base_currency,
+                       ledger.base_currency,
+                       threshold.policy_version,
+                       threshold.minimum_difference_low,
+                       threshold.minimum_difference_balanced,
+                       threshold.minimum_difference_high,
+                       threshold.minimum_price_increase
                 FROM analytics_settings AS settings
+                CROSS JOIN ledger_settings AS ledger
                 LEFT JOIN analytics_run AS published
                   ON published.generation = settings.published_generation
-                WHERE settings.singleton
+                JOIN analytics_threshold_profile AS threshold
+                  ON threshold.base_currency = ledger.base_currency
+                WHERE settings.singleton AND ledger.singleton
                 """
             )
             settings_row = cursor.fetchone()
             if settings_row is None:
                 raise RuntimeError("analytics settings singleton is missing")
+            base_currency = _currency(str(settings_row["base_currency"]))
+            threshold_profile = AnalyticsThresholdProfile(
+                base_currency=base_currency,
+                policy_version=str(settings_row["policy_version"]),
+                minimum_difference_low=settings_row["minimum_difference_low"],
+                minimum_difference_balanced=settings_row["minimum_difference_balanced"],
+                minimum_difference_high=settings_row["minimum_difference_high"],
+                minimum_price_increase=settings_row["minimum_price_increase"],
+            )
             previous_generation = (
                 int(settings_row["published_generation"])
                 if settings_row["published_generation"] is not None
+                and settings_row["previous_base_currency"] == base_currency
                 else None
             )
-            previous_watermark = settings_row["previous_watermark"]
+            previous_watermark = (
+                settings_row["previous_watermark"]
+                if previous_generation is not None
+                else None
+            )
             effective_mode = (
                 "incremental"
                 if mode == "incremental" and previous_generation is not None
@@ -1394,7 +1660,8 @@ class PostgresAnalyticsRepository:
                 """
                 SELECT GREATEST(
                     (SELECT max(updated_at) FROM txn),
-                    (SELECT max(updated_at) FROM statement)
+                    (SELECT max(updated_at) FROM statement),
+                    (SELECT max(updated_at) FROM account)
                 ) AS watermark
                 """
             )
@@ -1404,24 +1671,37 @@ class PostgresAnalyticsRepository:
                 cursor.execute(
                     """
                     INSERT INTO analytics_run (
-                        mode, status, source_watermark, started_at
-                    ) VALUES (%s, 'running', %s, now())
+                        mode, status, source_watermark, base_currency,
+                        threshold_policy_version, started_at
+                    ) VALUES (%s, 'running', %s, %s, %s, now())
                     RETURNING id::text, generation
                     """,
-                    (effective_mode, watermark),
+                    (
+                        effective_mode,
+                        watermark,
+                        base_currency,
+                        threshold_profile.policy_version,
+                    ),
                 )
             else:
                 cursor.execute(
                     """
                     UPDATE analytics_run
                     SET mode = %s, status = 'running', source_watermark = %s,
+                        base_currency = %s, threshold_policy_version = %s,
                         started_at = COALESCE(started_at, now()), finished_at = NULL,
                         result = NULL, error = NULL
                     WHERE id = %s
                       AND status IN ('queued', 'running', 'failed')
                     RETURNING id::text, generation
                     """,
-                    (effective_mode, watermark, run_id),
+                    (
+                        effective_mode,
+                        watermark,
+                        base_currency,
+                        threshold_profile.policy_version,
+                        run_id,
+                    ),
                 )
             run_row = cursor.fetchone()
             if run_row is None:
@@ -1459,7 +1739,7 @@ class PostgresAnalyticsRepository:
             cursor.execute(
                 """
                 SELECT detector_fingerprint, status, cadence_override,
-                       expected_amount_override, next_date_override
+                       expected_amount_override, next_date_override, market_scope
                 FROM recurring_series
                 """
             )
@@ -1474,6 +1754,7 @@ class PostgresAnalyticsRepository:
                     ),
                     expected_amount_override=row["expected_amount_override"],
                     next_date_override=row["next_date_override"],
+                    market_scope=MarketScope(str(row["market_scope"])),
                 )
                 for row in cursor.fetchall()
             )
@@ -1484,6 +1765,8 @@ class PostgresAnalyticsRepository:
             mode=effective_mode,
             sensitivity=sensitivity,
             source_watermark=watermark if isinstance(watermark, datetime) else None,
+            base_currency=base_currency,
+            threshold_profile=threshold_profile,
         )
         return AnalyticsSnapshot(
             context=context,
@@ -1538,7 +1821,8 @@ class PostgresAnalyticsRepository:
                 category.id::text AS category_id,
                 account.kind AS account_kind,
                 transaction.enrichment #>> '{categorization,flow_type}' AS enriched_flow,
-                transaction.enrichment @> '{"is_reversal": true}'::jsonb AS is_reversal
+                transaction.enrichment @> '{"is_reversal": true}'::jsonb AS is_reversal,
+                account.market_code
             FROM txn AS transaction
             JOIN account ON account.id = transaction.account_id
             LEFT JOIN merchant ON merchant.id = transaction.merchant_id
@@ -1575,6 +1859,11 @@ class PostgresAnalyticsRepository:
                     fx_fee_amount_native=row["fx_fee_amount_native"],
                     direction=str(row["direction"]),
                     is_reversal=bool(row["is_reversal"]),
+                    market_code=(
+                        str(row["market_code"])
+                        if row["market_code"] is not None
+                        else None
+                    ),
                 )
             )
         return tuple(transactions)
@@ -1585,14 +1874,16 @@ class PostgresAnalyticsRepository:
             """
             WITH statement_totals AS (
                 SELECT statement.id, statement.account_id,
+                       account.market_code,
                        statement.period_start, statement.period_end,
                        statement.opening_balance, statement.closing_balance,
                        statement.currency, statement.reconcile_status,
                        COALESCE(SUM(transaction.amount_native), 0) AS transaction_total
                 FROM statement
+                JOIN account ON account.id = statement.account_id
                 LEFT JOIN txn AS transaction
                   ON transaction.statement_id = statement.id
-                GROUP BY statement.id
+                GROUP BY statement.id, account.market_code
             ), ordered AS (
                 SELECT statement_totals.*,
                        MAX(period_end) OVER (
@@ -1604,7 +1895,7 @@ class PostgresAnalyticsRepository:
             )
             SELECT id::text, account_id::text, period_start, period_end,
                    opening_balance, closing_balance, currency, reconcile_status,
-                   transaction_total, previous_covered_until
+                   transaction_total, previous_covered_until, market_code
             FROM ordered
             WHERE reconcile_status = 'mismatch'
                OR period_start > previous_covered_until + 1
@@ -1612,10 +1903,15 @@ class PostgresAnalyticsRepository:
             """
         )
         findings: list[InsightFindingCandidate] = []
+        market_by_account: dict[str, MarketScope | None] = {}
         for row in cursor.fetchall():
             mismatch = str(row["reconcile_status"]) == "mismatch"
             statement_id = str(row["id"])
             account_id = str(row["account_id"])
+            raw_market = row.get("market_code")
+            market_by_account[account_id] = (
+                MarketScope(str(raw_market)) if raw_market is not None else None
+            )
             if mismatch:
                 opening = row["opening_balance"]
                 closing = row["closing_balance"]
@@ -1683,7 +1979,21 @@ class PostgresAnalyticsRepository:
                         },
                     )
                 )
-        return tuple(findings)
+        scoped_findings: list[InsightFindingCandidate] = []
+        for finding in findings:
+            scopes = [MarketScope.ALL]
+            account_market = (
+                market_by_account.get(finding.account_id)
+                if finding.account_id is not None
+                else None
+            )
+            if account_market is not None:
+                scopes.append(account_market)
+            scoped_findings.extend(
+                replace(finding, market_scope=market_scope)
+                for market_scope in scopes
+            )
+        return tuple(scoped_findings)
 
     def publish_run(
         self,
@@ -1698,9 +2008,12 @@ class PostgresAnalyticsRepository:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT generation
-                FROM analytics_run
-                WHERE id = %s AND status = 'running'
+                SELECT run.generation, run.base_currency,
+                       run.threshold_policy_version,
+                       settings.base_currency AS active_base_currency
+                FROM analytics_run AS run
+                CROSS JOIN ledger_settings AS settings
+                WHERE run.id = %s AND run.status = 'running' AND settings.singleton
                 FOR UPDATE
                 """,
                 (context.run_id,),
@@ -1708,6 +2021,13 @@ class PostgresAnalyticsRepository:
             run_row = cursor.fetchone()
             if run_row is None or int(run_row["generation"]) != context.generation:
                 raise RuntimeError("analytics run is no longer publishable")
+            if (
+                str(run_row["base_currency"]) != context.base_currency
+                or str(run_row["active_base_currency"]) != context.base_currency
+                or str(run_row["threshold_policy_version"])
+                != context.threshold_profile.policy_version
+            ):
+                raise RuntimeError("analytics run currency or threshold policy is stale")
             cursor.execute(
                 "DELETE FROM analytics_monthly_aggregate WHERE generation = %s",
                 (context.generation,),
@@ -1772,13 +2092,13 @@ class PostgresAnalyticsRepository:
             """
             INSERT INTO analytics_monthly_aggregate (
                 generation, period_start, dimension_type,
-                account_id, category_id, merchant_id, currency_base,
+                account_id, category_id, merchant_id, market_scope, currency_base,
                 inflow_base, outflow_base, spending_base, net_base,
                 transaction_count, valued_count, pending_fx_count,
                 pending_fx_by_currency, coverage_status
             )
             SELECT %s, period_start, dimension_type,
-                   account_id, category_id, merchant_id, currency_base,
+                   account_id, category_id, merchant_id, market_scope, currency_base,
                    inflow_base, outflow_base, spending_base, net_base,
                    transaction_count, valued_count, pending_fx_count,
                    pending_fx_by_currency, coverage_status
@@ -1815,12 +2135,12 @@ class PostgresAnalyticsRepository:
                 """
                 INSERT INTO analytics_monthly_aggregate (
                     generation, period_start, dimension_type,
-                    account_id, category_id, merchant_id,
+                    account_id, category_id, merchant_id, market_scope, currency_base,
                     inflow_base, outflow_base, spending_base, net_base,
                     transaction_count, valued_count, pending_fx_count,
                     pending_fx_by_currency, coverage_status
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
@@ -1831,6 +2151,8 @@ class PostgresAnalyticsRepository:
                     account_id,
                     category_id,
                     merchant_id,
+                    aggregate.market_scope.value,
+                    aggregate.currency_base,
                     aggregate.inflow_base,
                     aggregate.outflow_base,
                     aggregate.spending_base,
@@ -1855,17 +2177,19 @@ class PostgresAnalyticsRepository:
             cursor.execute(
                 """
                 INSERT INTO recurring_series (
-                    detector_fingerprint, merchant_id, merchant_key, flow_type,
+                    detector_fingerprint, market_scope,
+                    merchant_id, merchant_key, flow_type,
                     detected_cadence, comparison_basis, comparison_currency,
                     detected_expected_amount, detected_next_date, confidence,
                     first_occurrence_date, latest_occurrence_date,
                     last_detected_generation
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s
                 )
-                ON CONFLICT (detector_fingerprint) DO UPDATE
-                SET merchant_id = COALESCE(EXCLUDED.merchant_id, recurring_series.merchant_id),
+                ON CONFLICT (market_scope, detector_fingerprint) DO UPDATE
+                SET market_scope = EXCLUDED.market_scope,
+                    merchant_id = COALESCE(EXCLUDED.merchant_id, recurring_series.merchant_id),
                     merchant_key = EXCLUDED.merchant_key,
                     flow_type = EXCLUDED.flow_type,
                     detected_cadence = EXCLUDED.detected_cadence,
@@ -1885,6 +2209,7 @@ class PostgresAnalyticsRepository:
                 """,
                 (
                     candidate.detector_fingerprint,
+                    candidate.market_scope.value,
                     candidate.merchant_id,
                     candidate.merchant_key,
                     candidate.flow_type.value,
@@ -1933,7 +2258,7 @@ class PostgresAnalyticsRepository:
                         occurrence_date, comparison_amount, comparison_currency,
                         comparison_basis, match_source, detected_generation
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'detected', %s)
-                    ON CONFLICT (transaction_id) DO NOTHING
+                    ON CONFLICT (series_id, transaction_id) DO NOTHING
                     """,
                     (
                         series_id,
@@ -1964,12 +2289,14 @@ class PostgresAnalyticsRepository:
             cursor.execute(
                 """
                 INSERT INTO insight_finding (
-                    detector_fingerprint, finding_type, severity, headline, evidence,
+                    detector_fingerprint, market_scope,
+                    finding_type, severity, headline, evidence,
                     account_id, transaction_id, recurring_series_id,
                     last_detected_generation
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (detector_fingerprint) DO UPDATE
-                SET finding_type = EXCLUDED.finding_type,
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (market_scope, detector_fingerprint) DO UPDATE
+                SET market_scope = EXCLUDED.market_scope,
+                    finding_type = EXCLUDED.finding_type,
                     severity = EXCLUDED.severity,
                     status = CASE
                         WHEN insight_finding.status = 'resolved' THEN 'new'
@@ -1990,6 +2317,7 @@ class PostgresAnalyticsRepository:
                 """,
                 (
                     finding.detector_fingerprint,
+                    finding.market_scope.value,
                     finding.finding_type.value,
                     finding.severity.value,
                     finding.headline,
@@ -2100,6 +2428,8 @@ def _high_outlier(
 
 def _comparison_values(
     transactions: Sequence[AnalyticsTransaction],
+    *,
+    base_currency: str,
 ) -> tuple[
     ComparisonBasis,
     str,
@@ -2125,7 +2455,7 @@ def _comparison_values(
         basis = ComparisonBasis.NATIVE
         amounts = [_native_price(transaction) for transaction in transactions]
     elif all(transaction.amount_base is not None for transaction in transactions):
-        currency = "CAD"
+        currency = _currency(base_currency)
         basis = ComparisonBasis.BASE
         amounts = []
         for transaction in transactions:

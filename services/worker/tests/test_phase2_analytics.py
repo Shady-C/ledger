@@ -11,6 +11,7 @@ from worker.analytics import (
     AnalyticsRefreshService,
     AnalyticsRunContext,
     AnalyticsSnapshot,
+    AnalyticsThresholdProfile,
     AnalyticsTransaction,
     AnomalyMethod,
     ComparisonBasis,
@@ -18,6 +19,7 @@ from worker.analytics import (
     FindingSeverity,
     FindingType,
     InsightFindingCandidate,
+    MarketScope,
     MonthlyAggregate,
     PostgresAnalyticsRepository,
     RecurringCadence,
@@ -60,6 +62,7 @@ def _transaction(
     fx_fee: str | None = None,
     direction: str | None = None,
     is_reversal: bool = False,
+    market_code: str | None = None,
 ) -> AnalyticsTransaction:
     return AnalyticsTransaction(
         transaction_id=transaction_id,
@@ -83,6 +86,7 @@ def _transaction(
         fx_fee_amount_native=Decimal(fx_fee) if fx_fee is not None else None,
         direction=direction,
         is_reversal=is_reversal,
+        market_code=market_code,
     )
 
 
@@ -711,7 +715,10 @@ def test_finding_builder_emits_complete_deterministic_suite_with_evidence() -> N
         "spike-category-id",
         "spike-merchant-id",
     }
-    assert spike.evidence["comparisonBasis"] == "complete valued CAD calendar months"
+    assert (
+        spike.evidence["comparisonBasis"]
+        == "complete valued home-currency calendar months"
+    )
     duplicate = next(
         finding for finding in findings if finding.finding_type is FindingType.NEAR_DUPLICATE
     )
@@ -1086,3 +1093,204 @@ def test_detector_parameter_validation() -> None:
         detect_near_duplicates([], window_days=-1)
     with pytest.raises(ValueError, match="thresholds"):
         detect_price_increases([], percent_threshold=Decimal("-1"))
+
+
+def test_refresh_materializes_all_and_assigned_market_scopes() -> None:
+    snapshot = AnalyticsSnapshot(
+        context=AnalyticsRunContext(
+            run_id="market-run",
+            generation=12,
+            mode="full",
+            sensitivity=Sensitivity.BALANCED,
+            source_watermark=None,
+        ),
+        transactions=(
+            _transaction(
+                "ca",
+                date(2026, 1, 1),
+                "10.00",
+                account="ca-account",
+                market_code="CA",
+            ),
+            _transaction(
+                "tz",
+                date(2026, 1, 2),
+                "20.00",
+                account="tz-account",
+                market_code="TZ",
+            ),
+            _transaction(
+                "unassigned",
+                date(2026, 1, 3),
+                "30.00",
+                account="unassigned-account",
+            ),
+        ),
+    )
+    repository = _MemoryAnalyticsRefreshRepository(snapshot)
+    ticks = iter([1.0, 1.01])
+
+    AnalyticsRefreshService(
+        repository=repository,
+        today=lambda: date(2026, 2, 1),
+        clock=lambda: next(ticks),
+    ).run({"mode": "full"})
+
+    assert repository.published is not None
+    ledger_rows = {
+        aggregate.market_scope: aggregate
+        for aggregate in repository.published[1]
+        if aggregate.dimension_type is AggregateDimension.LEDGER
+    }
+    assert ledger_rows[MarketScope.ALL].spending_base == Decimal("60.00")
+    assert ledger_rows[MarketScope.CANADA].spending_base == Decimal("10.00")
+    assert ledger_rows[MarketScope.TANZANIA].spending_base == Decimal("20.00")
+    assert all(
+        aggregate.dimension_key != "unassigned-account"
+        for aggregate in repository.published[1]
+        if aggregate.market_scope is not MarketScope.ALL
+    )
+
+
+def test_scope_fingerprints_isolate_recurring_review_identity() -> None:
+    rows = [
+        _transaction(
+            f"subscription-{index}",
+            date(2026, 1, 1) + timedelta(days=30 * index),
+            "10.00",
+            merchant="subscription",
+            market_code="CA",
+        )
+        for index in range(3)
+    ]
+
+    all_series = detect_recurring_series(rows, market_scope=MarketScope.ALL)[0]
+    canada_series = detect_recurring_series(rows, market_scope=MarketScope.CANADA)[0]
+
+    assert all_series.detector_fingerprint != canada_series.detector_fingerprint
+    assert all_series.market_scope is MarketScope.ALL
+    assert canada_series.market_scope is MarketScope.CANADA
+
+
+def test_home_currency_policy_only_changes_base_recurring_fingerprints() -> None:
+    start = date(2026, 1, 1)
+    original_rows = [
+        _transaction(
+            f"original-policy-{index}",
+            start + timedelta(days=30 * index),
+            "13000.00",
+            native_currency="TZS",
+            base_amount="7.00",
+            original_amount="5.00",
+            original_currency="USD",
+            merchant="original policy merchant",
+        )
+        for index in range(3)
+    ]
+    native_rows = [
+        _transaction(
+            f"native-policy-{index}",
+            start + timedelta(days=30 * index),
+            "5.00",
+            native_currency="USD",
+            base_amount="7.00",
+            merchant="native policy merchant",
+        )
+        for index in range(3)
+    ]
+    base_rows = [
+        _transaction(
+            f"base-policy-{index}",
+            start + timedelta(days=30 * index),
+            "5.00" if index % 2 == 0 else "13000.00",
+            native_currency="USD" if index % 2 == 0 else "TZS",
+            base_amount="7.00",
+            merchant="base policy merchant",
+        )
+        for index in range(3)
+    ]
+    rows = original_rows + native_rows + base_rows
+
+    def detected(base_currency: str, policy: str) -> dict[str, str]:
+        return {
+            candidate.merchant_key: candidate.detector_fingerprint
+            for candidate in detect_recurring_series(
+                rows,
+                base_currency=base_currency,
+                threshold_policy_version=policy,
+            )
+        }
+
+    cad_v1 = detected("CAD", "materiality-v1")
+    tzs_v1 = detected("TZS", "materiality-v1")
+    cad_v2 = detected("CAD", "materiality-v2")
+
+    assert cad_v1["base policy merchant"] != tzs_v1["base policy merchant"]
+    assert cad_v1["base policy merchant"] != cad_v2["base policy merchant"]
+    for merchant in ("original policy merchant", "native policy merchant"):
+        assert cad_v1[merchant] == tzs_v1[merchant] == cad_v2[merchant]
+
+
+def test_home_currency_policy_changes_only_base_sensitive_fingerprints() -> None:
+    tzs_thresholds = AnalyticsThresholdProfile(
+        base_currency="TZS",
+        policy_version="materiality-v1",
+        minimum_difference_low=Decimal("46296.30"),
+        minimum_difference_balanced=Decimal("18518.52"),
+        minimum_difference_high=Decimal("9259.26"),
+        minimum_price_increase=Decimal("1851.85"),
+    )
+    cad_context = AnalyticsRunContext(
+        run_id="cad-run",
+        generation=1,
+        mode="full",
+        sensitivity=Sensitivity.BALANCED,
+        source_watermark=None,
+    )
+    tzs_context = AnalyticsRunContext(
+        run_id="tzs-run",
+        generation=2,
+        mode="full",
+        sensitivity=Sensitivity.BALANCED,
+        source_watermark=None,
+        base_currency="TZS",
+        threshold_profile=tzs_thresholds,
+    )
+    pending = _transaction(
+        "pending",
+        date(2026, 1, 1),
+        "10.00",
+        native_currency="USD",
+        base_amount=None,
+    )
+    duplicates = (
+        _transaction("duplicate-1", date(2026, 1, 2), "10.00"),
+        _transaction("duplicate-2", date(2026, 1, 3), "10.00"),
+    )
+
+    cad_pending = build_insight_findings(
+        AnalyticsSnapshot(context=cad_context, transactions=(pending,)),
+        recurring_series=(),
+        as_of=date(2026, 2, 1),
+    )[0]
+    tzs_pending = build_insight_findings(
+        AnalyticsSnapshot(context=tzs_context, transactions=(pending,)),
+        recurring_series=(),
+        as_of=date(2026, 2, 1),
+    )[0]
+    cad_duplicate = build_insight_findings(
+        AnalyticsSnapshot(context=cad_context, transactions=duplicates),
+        recurring_series=(),
+        as_of=date(2026, 2, 1),
+    )[0]
+    tzs_duplicate = build_insight_findings(
+        AnalyticsSnapshot(context=tzs_context, transactions=duplicates),
+        recurring_series=(),
+        as_of=date(2026, 2, 1),
+    )[0]
+
+    assert cad_pending.detector_fingerprint != tzs_pending.detector_fingerprint
+    assert tzs_pending.evidence["baseCurrency"] == "TZS"
+    assert tzs_pending.evidence["thresholdPolicyVersion"] == "materiality-v1"
+    assert cad_duplicate.finding_type is FindingType.NEAR_DUPLICATE
+    assert cad_duplicate.detector_fingerprint == tzs_duplicate.detector_fingerprint
