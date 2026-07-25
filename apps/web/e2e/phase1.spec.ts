@@ -21,11 +21,19 @@ type MockState = {
   importStarted?: boolean;
   baseJobStarted?: boolean;
   activeBaseCurrency?: string;
+  targetBaseCurrency?: string;
+  baseCurrencyRequest?: unknown;
   mismatchOnce?: boolean;
   accountReads?: number;
   balanceReads?: number;
   findingDecision?: unknown;
+  settingsPatch?: unknown;
+  transactionDetailRead?: boolean;
+  transactionDetailUrl?: string;
   transactionItems?: Record<string, unknown>[];
+  accountItems?: typeof accounts;
+  marketProfile?: 'CA' | 'TZ' | null;
+  analyticsRebuilding?: boolean;
   insightsUrls?: string[];
 };
 
@@ -37,6 +45,7 @@ const accounts = [
     institutionName: 'Northstar Bank',
     kind: 'chequing',
     nativeCurrency: 'CAD',
+    marketCode: 'CA',
     accountRefMasked: '•••• 1024',
     currentBalance: '4200.00',
     currentBalanceBase: '4200.00',
@@ -55,6 +64,7 @@ const accounts = [
     institutionName: 'Northstar Bank',
     kind: 'credit_card',
     nativeCurrency: 'CAD',
+    marketCode: 'TZ',
     accountRefMasked: '•••• 4812',
     currentBalance: '1200.00',
     currentBalanceBase: '1200.00',
@@ -96,6 +106,7 @@ const transaction = {
   fxFeeAmountNative: null,
   isFxFee: false,
   valuationStatus: 'valued',
+  conversionIndicators: [],
   direction: 'debit',
   runningBalance: '1200.00',
   runningBalanceNative: '1200.00',
@@ -120,8 +131,9 @@ async function mockLedger(page: Page, state: MockState = {}) {
 
     if (url.pathname === '/api/accounts' && method === 'GET') {
       state.accountReads = (state.accountReads ?? 0) + 1;
+      const market = url.searchParams.get('market');
       return json({
-        accounts,
+        accounts: market ? (state.accountItems ?? accounts).filter((account) => account.marketCode === market) : (state.accountItems ?? accounts),
         creditUtilization: {
           baseCurrency: 'CAD',
           usedCreditBase: '1200.00',
@@ -140,9 +152,15 @@ async function mockLedger(page: Page, state: MockState = {}) {
     if (url.pathname === '/api/accounts' && method === 'POST') return json({ account: accounts[0] }, 201);
     if (url.pathname === '/api/institutions' && method === 'GET') return json({ institutions: [{ id: institutionId, name: 'Northstar Bank' }] });
     if (url.pathname.startsWith('/api/institutions') && method !== 'GET') return json({ institution: { id: institutionId, name: 'Northstar Bank' } });
-    if (url.pathname === '/api/settings' && method === 'GET') return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', updatedAt: '2026-07-20T12:00:00.000Z' });
+    if (url.pathname === '/api/settings' && method === 'GET') return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', marketProfile: state.marketProfile ?? null, updatedAt: '2026-07-20T12:00:00.000Z' });
+    if (url.pathname === '/api/settings' && method === 'PATCH') {
+      state.settingsPatch = request.postDataJSON();
+      return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', marketProfile: (state.settingsPatch as { marketProfile: string }).marketProfile, updatedAt: '2026-07-20T12:00:00.000Z' });
+    }
     if (url.pathname === '/api/settings/base-currency' && method === 'POST') {
       state.baseJobStarted = true;
+      state.baseCurrencyRequest = request.postDataJSON();
+      state.targetBaseCurrency = (state.baseCurrencyRequest as { baseCurrency: string }).baseCurrency;
       return json({ jobId, kind: 'base_currency_rebuild', status: 'queued' }, 202);
     }
 
@@ -216,7 +234,9 @@ async function mockLedger(page: Page, state: MockState = {}) {
       }]
     });
 
-    if (url.pathname === '/api/insights/summary' && method === 'GET') return json({
+    if (url.pathname === '/api/insights/summary' && method === 'GET') {
+      if (state.analyticsRebuilding) return json({ error: { code: 'analytics_rebuilding', message: 'Analytics are rebuilding for TZS.' } }, 503);
+      return json({
       baseCurrency: 'CAD', range: { from: '2025-08-01', to: '2026-07-24' },
       coverage: {
         status: state.partial ? 'partial' : 'complete',
@@ -230,7 +250,8 @@ async function mockLedger(page: Page, state: MockState = {}) {
       recurring: { activeSeries: 1, overdueSeries: 0, expectedMonthlyAmount: '25.00' },
       findings: { new: 1, confirmed: 0, dismissed: 0, resolved: 0, unread: 1 },
       latestRun: null
-    });
+      });
+    }
     if (url.pathname === '/api/insights/trends' && method === 'GET') return json({
       baseCurrency: 'CAD', range: { from: '2025-08-01', to: '2026-07-24' }, groupBy: url.searchParams.get('groupBy') ?? 'ledger',
       coverage: { status: 'complete', valuedTransactionCount: 12, unvaluedTransactionCount: 0, unvaluedByCurrency: [] },
@@ -263,6 +284,20 @@ async function mockLedger(page: Page, state: MockState = {}) {
       const items = state.transactionItems ?? [transaction];
       return json({ items, page: Number(url.searchParams.get('page') ?? 1), pageSize: Number(url.searchParams.get('pageSize') ?? 25), total: items.length, totalPages: items.length === 0 ? 0 : 1 });
     }
+    if (url.pathname === `/api/transactions/${transactionId}` && method === 'GET') {
+      state.transactionDetailRead = true;
+      state.transactionDetailUrl = request.url();
+      return json({
+        transaction: { ...transaction, conversionIndicators: ['fx'] },
+        conversionEvidence: {
+          indicators: ['fx'], valuationStatus: 'valued', reportingRate: '1.00000000', reportingRateDate: '2026-07-19',
+          bankAppliedRate: '1.39000000', referenceRate: '1.35000000', referenceRateDate: '2026-07-19',
+          referenceRateSource: 'fixture', explicitFeeNative: '3.00', explicitFeeBase: '3.00',
+          estimatedMarkupNative: '5.42', estimatedMarkupBase: '5.42',
+          runningBalanceNative: '1200.00', runningBalanceBase: '1200.00'
+        }
+      });
+    }
     if (url.pathname === `/api/transactions/${transactionId}` && method === 'PATCH') {
       state.transactionPatch = request.postDataJSON();
       return json({ transaction: { id: transactionId, categoryId: categoryTwoId, categoryName: 'Other', categorySource: 'user_transaction', categoryConfidence: '1.00' }, merchantTransactionsUpdated: 1 });
@@ -271,10 +306,10 @@ async function mockLedger(page: Page, state: MockState = {}) {
     if (url.pathname === '/api/jobs' && method === 'GET') return json({ jobs: [{ id: jobId, kind: 'ingest', status: 'done', createdAt: '2026-07-20T12:00:00.000Z', finishedAt: '2026-07-20T12:00:02.000Z', retryCount: 0, maxRetries: 3 }], page: 1, pageSize: 25, total: 1, totalPages: 1 });
     if (url.pathname.startsWith('/api/jobs/') && method === 'GET') {
       if (state.baseJobStarted) {
-        state.activeBaseCurrency = 'USD';
+        state.activeBaseCurrency = state.targetBaseCurrency ?? 'TZS';
         return json({
           id: url.pathname.split('/').at(-1), kind: 'base_currency_rebuild', status: 'done', createdAt: '2026-07-20T12:00:00.000Z', finishedAt: '2026-07-20T12:00:02.000Z', retryCount: 0, maxRetries: 3, error: null,
-          result: { previousBaseCurrency: 'CAD', targetBaseCurrency: 'USD', transactionsUpdated: 1, settingsUpdated: true }
+          result: { previousBaseCurrency: 'CAD', targetBaseCurrency: state.activeBaseCurrency, transactionsUpdated: 1, settingsUpdated: true }
         });
       }
       return json({
@@ -299,20 +334,25 @@ test('all focused pages support direct loads', async ({ page }) => {
     ['/accounts', 'Assets and credit, separated.'],
     ['/categories', 'Automation, with the final say yours.'],
     ['/insights', 'See the pattern. Inspect the proof.'],
-    ['/imports', 'From statement to reconciled record.']
+    ['/imports', 'From statement to reconciled record.'],
+    ['/more', 'Everything else, close at hand.'],
+    ['/settings', 'Settings, without the clutter.']
   ] as const) {
     await page.goto(path);
     await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
   }
 });
 
-test('mobile navigation reaches each focused page', async ({ page }) => {
+test('mobile navigation uses Home, Activity, Insights, and More', async ({ page }) => {
   await mockLedger(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   const nav = page.getByRole('navigation', { name: 'Mobile navigation' });
   await expect(nav).toBeVisible();
-  await nav.getByRole('link', { name: 'Accounts' }).click();
+  await expect(nav.getByRole('link')).toHaveCount(4);
+  await nav.getByRole('link', { name: 'More' }).click();
+  await expect(page).toHaveURL(/\/more$/);
+  await page.getByRole('link', { name: /Accounts/ }).click();
   await expect(page).toHaveURL(/\/accounts$/);
   await expect(page.getByRole('heading', { level: 1, name: 'Assets and credit, separated.' })).toBeVisible();
 });
@@ -322,27 +362,29 @@ test('dashboard identifies partial net worth', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Net worth is partial.')).toBeVisible();
   await expect(page.getByText(/1 account is excluded/)).toBeVisible();
-  await expect(page.getByText('Historical CAD analytics are partial.')).toBeVisible();
+  await expect(page.getByText('Historical CAD analytics are partial.')).toHaveCount(0);
 });
 
-test('dashboard separates actual FX fees from estimated rate markup', async ({ page }) => {
+test('Insights separates actual FX fees from estimated rate markup', async ({ page }) => {
+  await mockLedger(page);
+  await page.goto('/insights');
+  await page.getByRole('tab', { name: 'FX' }).click();
+  await expect(page.getByText('FX rate and cost evidence')).toBeVisible();
+  await expect(page.getByText('Bank-applied rate', { exact: true })).toBeVisible();
+  await expect(page.getByText('Reference rate', { exact: true })).toBeVisible();
+  await expect(page.getByText('Actual fee', { exact: true })).toBeVisible();
+  await expect(page.locator('.fx-list dt').filter({ hasText: /^Estimated markup$/ })).toBeVisible();
+});
+
+test('Home stays focused on net worth, accounts, and recent activity', async ({ page }) => {
   await mockLedger(page);
   await page.goto('/');
-  await expect(page.getByText(/Actual fees CA\$3\.00/)).toBeVisible();
-  await page.getByText('FX rate and cost evidence').click();
-  await expect(page.getByText('Bank-applied rate')).toBeVisible();
-  await expect(page.getByText('Reference market rate')).toBeVisible();
-  await expect(page.getByText('Actual statement fee')).toBeVisible();
-  await expect(page.getByText('Estimated markup', { exact: true })).toBeVisible();
-});
-
-test('dashboard retries instead of rendering a mixed-base snapshot', async ({ page }) => {
-  const state: MockState = { mismatchOnce: true };
-  await mockLedger(page, state);
-  await page.goto('/');
   await expect(page.locator('.net-worth strong')).toContainText('3,000.00');
-  await expect.poll(() => state.accountReads ?? 0).toBeGreaterThanOrEqual(2);
-  await expect(page.getByText(/Ledger valuation changed/)).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Your accounts' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Recent transactions' })).toBeVisible();
+  await expect(page.getByText('Analytics health')).toHaveCount(0);
+  await expect(page.getByText('FX rate and cost evidence')).toHaveCount(0);
+  await expect(page.getByRole('meter')).toHaveCount(0);
 });
 
 test('transaction filters are restored from and written to the URL', async ({ page }) => {
@@ -357,7 +399,7 @@ test('transaction filters are restored from and written to the URL', async ({ pa
   await expect(page).toHaveURL(/direction=debit/);
 });
 
-test('transaction amount stack shows original, posted, reporting, and pending states', async ({ page }) => {
+test('transaction rows show one posted amount and open conversion evidence on demand', async ({ page }) => {
   const state: MockState = {
     transactionItems: [
       {
@@ -369,6 +411,7 @@ test('transaction amount stack shows original, posted, reporting, and pending st
         amountBase: '-142.90',
         fxRate: '0.00052926',
         fxFeeAmountNative: '5000.00',
+        conversionIndicators: ['fx'],
         runningBalance: '730000.00',
         runningBalanceNative: '730000.00',
         runningBalanceBase: '386.00'
@@ -386,19 +429,64 @@ test('transaction amount stack shows original, posted, reporting, and pending st
         fxRateDate: null,
         fxFeeAmountNative: null,
         valuationStatus: 'pending_fx',
+        conversionIndicators: ['pending'],
         runningBalance: '960.00',
         runningBalanceNative: '960.00',
+        runningBalanceBase: null
+      },
+      {
+        ...transaction,
+        id: '55555555-5555-4555-8555-555555555557',
+        description: 'Reporting-only conversion',
+        amountNative: '-40.00',
+        currencyNative: 'USD',
+        amountBase: '-55.00',
+        conversionIndicators: ['converted']
+      },
+      {
+        ...transaction,
+        id: '55555555-5555-4555-8555-555555555558',
+        description: 'Pending merchant conversion',
+        merchantName: null,
+        amountNative: '-40000.00',
+        currencyNative: 'TZS',
+        originalAmount: '-16.00',
+        originalCurrency: 'USD',
+        amountBase: null,
+        fxRate: null,
+        fxRateDate: null,
+        valuationStatus: 'pending_fx',
+        conversionIndicators: ['fx', 'pending'],
+        runningBalance: '920000.00',
+        runningBalanceNative: '920000.00',
         runningBalanceBase: null
       }
     ]
   };
   await mockLedger(page, state);
-  await page.goto('/transactions');
-  await expect(page.getByText('Original', { exact: true })).toBeVisible();
-  await expect(page.getByText('Posted', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('Reporting', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('CAD valuation pending')).toBeVisible();
-  await expect(page.getByText('Actual FX fee')).toBeVisible();
+  await page.goto('/transactions?market=TZ');
+  await expect(page.getByText('FX').first()).toBeVisible();
+  await expect(page.getByText('Converted')).toBeVisible();
+  await expect(page.getByText('Pending', { exact: true }).first()).toBeVisible();
+  const pendingFxRow = page.getByRole('row').filter({ hasText: 'Pending merchant conversion' });
+  await expect(pendingFxRow.getByText('FX', { exact: true })).toBeVisible();
+  await expect(pendingFxRow.getByText('Pending', { exact: true })).toBeVisible();
+  await expect(page.getByText('Running balance')).toHaveCount(0);
+  const detailButton = page.getByRole('button', { name: /View conversion details for Coffee House/ }).first();
+  await detailButton.click();
+  await expect(page.getByRole('dialog', { name: 'Conversion details' })).toBeVisible();
+  await expect(page.getByText('Bank-applied rate')).toBeVisible();
+  await expect.poll(() => state.transactionDetailRead).toBe(true);
+  await expect.poll(() => state.transactionDetailUrl ?? '').toContain('market=TZ');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Conversion details' })).toHaveCount(0);
+  await expect(detailButton).toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await detailButton.click();
+  await expect(page.getByRole('dialog', { name: 'Conversion details' })).toBeVisible();
+  await expect.poll(async () => Math.round((await page.locator('.drawer').boundingBox())?.width ?? 0)).toBe(390);
+  await page.getByRole('button', { name: 'Close conversion details' }).click();
 });
 
 test('transaction category override sends the explicit scope', async ({ page }) => {
@@ -415,6 +503,7 @@ test('credit-card editing saves the native-currency limit', async ({ page }) => 
   const state: MockState = {};
   await mockLedger(page, state);
   await page.goto('/accounts');
+  await expect(page.getByRole('meter', { name: 'Travel rewards utilization' })).toBeVisible();
   await page.locator('.credit-card').getByRole('button', { name: 'Edit' }).click();
   await expect(page.getByRole('heading', { name: 'Edit Travel rewards' })).toBeVisible();
   await page.getByLabel('Credit limit (CAD)').fill('7200.00');
@@ -422,13 +511,62 @@ test('credit-card editing saves the native-currency limit', async ({ page }) => 
   await expect.poll(() => state.accountPatch).toMatchObject({ creditLimit: '7200.00', kind: 'credit_card', nativeCurrency: 'CAD' });
 });
 
-test('accounts keep CAD reporting fixed while native currencies remain explicit', async ({ page }) => {
-  await mockLedger(page);
-  await page.goto('/accounts');
-  await expect(page.locator('.credit-card')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Reporting currency' })).toBeVisible();
-  await expect(page.getByText('Consolidated values use CAD.')).toBeVisible();
-  await expect(page.getByLabel('Display currency')).toHaveCount(0);
+test('settings keep market profile separate from stable home currency', async ({ page }) => {
+  const state: MockState = {};
+  await mockLedger(page, state);
+  await page.goto('/settings');
+  await expect(page.getByRole('heading', { name: 'Market profile' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Home currency', exact: true })).toBeVisible();
+  await page.getByLabel('Default market').selectOption('TZ');
+  await page.getByRole('button', { name: 'Save profile' }).click();
+  await expect.poll(() => state.settingsPatch).toEqual({ marketProfile: 'TZ' });
+  await expect(page.getByLabel('Target home currency')).toHaveValue('CAD');
+});
+
+test('home currency changes require explicit Advanced confirmation', async ({ page }) => {
+  const state: MockState = {};
+  await mockLedger(page, state);
+  await page.goto('/settings');
+  await page.getByLabel('Target home currency').selectOption('TZS');
+  await expect(page.getByRole('button', { name: 'Change to TZS' })).toBeDisabled();
+  await page.getByLabel(/I understand Insights will rebuild/).check();
+  await page.getByRole('button', { name: 'Change to TZS' }).click();
+  await expect.poll(() => state.baseCurrencyRequest).toEqual({ baseCurrency: 'TZS', confirmed: true });
+  await expect(page.getByText(/Home currency changed to TZS/)).toBeVisible();
+});
+
+test('market scope is written to the URL, remembered, and sent to data APIs', async ({ page }) => {
+  const state: MockState = {};
+  await mockLedger(page, state);
+  await page.goto(`/transactions?accountId=${assetId}`);
+  await page.getByRole('button', { name: 'Tanzania', pressed: false }).click();
+  await expect(page).toHaveURL(/market=TZ/);
+  await expect(page.getByLabel('Filter by account')).toHaveValue('');
+  await expect.poll(() => state.transactionUrl ?? '').toContain('market=TZ');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('ledger.market'))).toBe('TZ');
+});
+
+test('market profile supplies the first-visit scope when URL and storage are absent', async ({ page }) => {
+  const state: MockState = { marketProfile: 'TZ' };
+  await mockLedger(page, state);
+  await page.goto('/transactions');
+  await expect(page.getByRole('button', { name: 'Tanzania' })).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => state.transactionUrl ?? '').toContain('market=TZ');
+});
+
+test('unassigned accounts are marked and can be classified without profile inference', async ({ page }) => {
+  const state: MockState = {
+    accountItems: [{ ...accounts[1], marketCode: null }],
+    marketProfile: 'CA'
+  };
+  await mockLedger(page, state);
+  await page.goto('/accounts?market=ALL');
+  await expect(page.getByText('Market needed')).toBeVisible();
+  await page.locator('.credit-card').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.getByLabel('Account market')).toHaveValue('');
+  await page.getByLabel('Account market').selectOption('TZ');
+  await page.getByRole('button', { name: 'Save account' }).click();
+  await expect.poll(() => state.accountPatch).toMatchObject({ marketCode: 'TZ' });
 });
 
 test('insight findings expose evidence and explicit review actions', async ({ page }) => {
@@ -471,6 +609,13 @@ test('Insights remains usable without page-level overflow on a mobile viewport',
   await expect.poll(() => page.evaluate(
     () => document.documentElement.scrollWidth <= window.innerWidth
   )).toBe(true);
+});
+
+test('Insights explains the maintenance state during a home-currency rebuild', async ({ page }) => {
+  await mockLedger(page, { analyticsRebuilding: true });
+  await page.goto('/insights');
+  await expect(page.getByText('Insights are rebuilding.')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open Advanced settings' })).toBeVisible();
 });
 
 test('category proposals require an explicit decision', async ({ page }) => {

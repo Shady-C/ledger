@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import type {
     AccountsResponse,
-    InstitutionsResponse
+    InstitutionsResponse,
+    MarketCode
   } from '@ledger/shared-types';
 
   import AccountForm from '$lib/components/AccountForm.svelte';
@@ -10,12 +11,20 @@
   import { readJson, readOptionalJson, sendJson } from '$lib/components/api-client.js';
   import type { AccountView, InstitutionView } from '$lib/components/phase1-types.js';
   import { accountKind, money } from '$lib/format.js';
+  import {
+    initializeMarketScope,
+    marketLabel,
+    marketState,
+    withMarket,
+    type MarketSelection
+  } from '$lib/market-scope.js';
 
   type AccountDraft = {
     institutionId: string | null;
     displayName: string;
     kind: AccountView['kind'];
     nativeCurrency: string;
+    marketCode: MarketCode;
     accountRefMasked: string | null;
     creditLimit: string | null;
   };
@@ -30,6 +39,7 @@
   let savingInstitution = false;
   let editingInstitutionId = '';
   let editingInstitutionName = '';
+  let market: MarketSelection = '';
 
   $: assets = accounts.filter((account) => account.kind !== 'credit_card');
   $: cards = accounts.filter((account) => account.kind === 'credit_card');
@@ -39,7 +49,7 @@
     pageError = '';
     try {
       const [accountResult, institutionResult] = await Promise.all([
-        readJson<AccountsResponse>('/api/accounts'),
+        readJson<AccountsResponse>(withMarket('/api/accounts', market)),
         readOptionalJson<InstitutionsResponse>('/api/institutions').catch(() => null)
       ]);
       accounts = accountResult.accounts;
@@ -56,6 +66,7 @@
     await sendJson(url, editingAccount ? 'PATCH' : 'POST', draft);
     message = editingAccount ? `${draft.displayName} was updated.` : `${draft.displayName} was added.`;
     editingAccount = null;
+    window.dispatchEvent(new Event('ledger:accounts-changed'));
     await load();
   }
 
@@ -87,7 +98,23 @@
     }
   }
 
-  onMount(load);
+  async function initialize() {
+    const state = await initializeMarketScope(new URL(window.location.href));
+    market = state.market;
+    await load();
+  }
+
+  function handleMarketChange(event: Event) {
+    market = (event as CustomEvent<{ market: MarketSelection }>).detail.market;
+    editingAccount = null;
+    void load();
+  }
+
+  onMount(() => {
+    void initialize();
+    window.addEventListener('ledger:market-change', handleMarketChange);
+    return () => window.removeEventListener('ledger:market-change', handleMarketChange);
+  });
 </script>
 
 <svelte:head>
@@ -100,7 +127,7 @@
     <div class="page-header-copy">
       <p class="eyebrow">Balance sheet</p>
       <h1>Assets and credit, separated.</h1>
-      <p class="lede">Keep account identity and native currency explicit while consolidated reporting remains a derived CAD lens.</p>
+      <p class="lede">Keep account identity, market, and native currency explicit while consolidated reporting remains a separate lens.</p>
     </div>
   </header>
 
@@ -115,13 +142,14 @@
     {#if loading}
       <div class="account-grid"><div class="skeleton-block"></div><div class="skeleton-block"></div></div>
     {:else if assets.length === 0}
-      <div class="panel empty-state"><strong>No asset accounts</strong><p>Add chequing, savings, or wallet accounts below.</p></div>
+      <div class="panel empty-state"><strong>No asset accounts in {marketLabel(market)}</strong><p>Add chequing, savings, or wallet accounts below.</p></div>
     {:else}
       <div class="account-grid">
         {#each assets as account}
           <article class="account-card">
             <div class="account-top"><span>{account.institutionName ?? accountKind(account.kind)}</span><button class="text-button" type="button" on:click={() => (editingAccount = account)}>Edit</button></div>
             <h3>{account.displayName}</h3>
+            {#if account.marketCode == null}<span class="market-needed">Market needed</span>{:else}<span class="market-tag">{account.marketCode === 'CA' ? 'Canada' : 'Tanzania'}</span>{/if}
             <strong class="balance">{money(account.currentBalance, account.nativeCurrency)}</strong>
             {#if account.currentBalanceBase != null && account.baseCurrency && account.baseCurrency !== account.nativeCurrency}
               <small>{money(account.currentBalanceBase, account.baseCurrency)} consolidated</small>
@@ -138,13 +166,14 @@
     {#if loading}
       <div class="account-grid"><div class="skeleton-block"></div></div>
     {:else if cards.length === 0}
-      <div class="panel empty-state"><strong>No credit cards</strong><p>Add a card below, then set its optional native-currency limit.</p></div>
+      <div class="panel empty-state"><strong>No credit cards in {marketLabel(market)}</strong><p>Add a card below, then set its optional native-currency limit.</p></div>
     {:else}
       <div class="account-grid">
         {#each cards as account}
           <article class="account-card credit-card">
             <div class="account-top"><span>{account.institutionName ?? 'Credit card'}</span><button class="text-button" type="button" on:click={() => (editingAccount = account)}>Edit</button></div>
             <h3>{account.displayName}</h3>
+            {#if account.marketCode == null}<span class="market-needed">Market needed</span>{:else}<span class="market-tag">{account.marketCode === 'CA' ? 'Canada' : 'Tanzania'}</span>{/if}
             <strong class="balance">{money(account.currentBalance, account.nativeCurrency)}</strong>
             <small>Current card balance</small>
             <UtilizationMeter label={`${account.displayName} utilization`} value={account.utilizationPercent} used={account.usedCredit} limit={account.creditLimit} available={account.availableCredit} currency={account.nativeCurrency} />
@@ -157,15 +186,10 @@
   <section class="management-grid">
     <article class="panel" aria-labelledby="account-form-title">
       <div class="panel-heading"><div><h2 id="account-form-title">{editingAccount ? `Edit ${editingAccount.displayName}` : 'Add an account'}</h2><p>Financial records are never removed by account editing.</p></div></div>
-      <AccountForm account={editingAccount} {institutions} onSubmit={saveAccount} onCancel={() => (editingAccount = null)} />
+      <AccountForm account={editingAccount} {institutions} defaultMarket={market || $marketState.settings?.marketProfile || ''} onSubmit={saveAccount} onCancel={() => (editingAccount = null)} />
     </article>
 
     <div class="side-stack">
-      <article class="panel" aria-labelledby="currency-title">
-        <div class="panel-heading"><div><h2 id="currency-title">Reporting currency</h2><p>Consolidated values use CAD.</p></div></div>
-        <p class="fine-print">Each account keeps its own posted currency. CAD is a derived reporting lens; unavailable historical rates remain visibly pending.</p>
-      </article>
-
       <article class="panel" aria-labelledby="institutions-title">
         <div class="panel-heading"><div><h2 id="institutions-title">Institutions</h2><p>Reusable names for account issuers and banks.</p></div></div>
         <form class="inline-form" on:submit|preventDefault={addInstitution}>
@@ -210,10 +234,12 @@
   .account-card h3 { margin: 0.6rem 0 0; font-size: 1rem; letter-spacing: -0.025em; }
   .account-card .balance { color: var(--forest); font-size: 1.65rem; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
   .account-card p { margin: 0.4rem 0 0; line-height: 1.45; }
+  .market-tag, .market-needed { width: fit-content; padding: 0.24rem 0.45rem; border-radius: 999px; font-size: 0.57rem; font-weight: 800; }
+  .market-tag { color: #285049; background: #e2f1ec; }
+  .market-needed { color: #765c19; background: #f5e8bd; }
   .management-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr); gap: 1rem; align-items: start; }
   .side-stack { display: grid; gap: 1rem; }
   .inline-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.55rem; align-items: end; }
-  .fine-print { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.64rem; line-height: 1.5; }
   .institution-list { padding: 0; margin: 1rem 0 0; list-style: none; }
   .institution-list li { display: flex; min-height: 42px; align-items: center; gap: 0.4rem; border-top: 1px solid #e8e9e3; font-size: 0.72rem; }
   .institution-list li > span { flex: 1; }

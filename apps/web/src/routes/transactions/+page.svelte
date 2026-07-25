@@ -15,6 +15,12 @@
     CategoryView,
     TransactionPageView
   } from '$lib/components/phase1-types.js';
+  import {
+    initializeMarketScope,
+    marketState,
+    withMarket,
+    type MarketSelection
+  } from '$lib/market-scope.js';
 
   const DEFAULT_PAGE_SIZE = 25;
   const sorts: TransactionSort[] = ['booked_date_desc', 'booked_date_asc', 'amount_desc', 'amount_asc'];
@@ -34,6 +40,7 @@
   let sort: TransactionSort = 'booked_date_desc';
   let page = 1;
   let pageSize = DEFAULT_PAGE_SIZE;
+  let market: MarketSelection = '';
 
   $: hasFilters = Boolean(search || accountId || categoryId || direction || from || to || sort !== 'booked_date_desc' || pageSize !== DEFAULT_PAGE_SIZE);
 
@@ -52,6 +59,7 @@
 
   function queryString() {
     const query = new URLSearchParams();
+    if (market) query.set('market', market);
     if (search) query.set('search', search);
     if (accountId) query.set('accountId', accountId);
     if (categoryId) query.set('categoryId', categoryId);
@@ -75,7 +83,7 @@
 
   async function loadReferences() {
     const [accountResult, categoryResult] = await Promise.all([
-      readJson<AccountsResponse>('/api/accounts'),
+      readJson<AccountsResponse>(withMarket('/api/accounts', market)),
       readJson<CategoriesResponse>('/api/categories')
     ]);
     accounts = accountResult.accounts;
@@ -156,9 +164,17 @@
   }
 
   async function initialize() {
+    const marketResult = await initializeMarketScope(new URL(window.location.href));
+    market = marketResult.market;
     readState(new URL(window.location.href));
     try {
-      await Promise.all([loadReferences(), loadTransactions()]);
+      await loadReferences();
+      if (accountId && !accounts.some((account) => account.id === accountId)) {
+        accountId = '';
+        page = 1;
+        await syncUrl();
+      }
+      await loadTransactions();
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'The ledger is temporarily unavailable.';
       loading = false;
@@ -166,14 +182,37 @@
   }
 
   function handleHistory() {
-    readState(new URL(window.location.href));
-    void loadTransactions();
+    void (async () => {
+      const state = await initializeMarketScope(new URL(window.location.href));
+      market = state.market;
+      readState(new URL(window.location.href));
+      await loadReferences();
+      if (accountId && !accounts.some((account) => account.id === accountId)) accountId = '';
+      await loadTransactions();
+    })();
+  }
+
+  function handleMarketChange(event: Event) {
+    void (async () => {
+      market = (event as CustomEvent<{ market: MarketSelection }>).detail.market;
+      await loadReferences();
+      if (accountId && !accounts.some((account) => account.id === accountId)) {
+        accountId = '';
+        page = 1;
+        await syncUrl();
+      }
+      await loadTransactions();
+    })();
   }
 
   onMount(() => {
     void initialize();
     window.addEventListener('popstate', handleHistory);
-    return () => window.removeEventListener('popstate', handleHistory);
+    window.addEventListener('ledger:market-change', handleMarketChange);
+    return () => {
+      window.removeEventListener('popstate', handleHistory);
+      window.removeEventListener('ledger:market-change', handleMarketChange);
+    };
   });
 </script>
 
@@ -187,9 +226,9 @@
     <div class="page-header-copy">
       <p class="eyebrow">Canonical ledger</p>
       <h1>Every transaction, traceable.</h1>
-      <p class="lede">Filter the full record, compare native and base amounts, and teach Ledger how matching merchants should be categorized.</p>
+      <p class="lede">Filter the full record, inspect account-posted activity, and open reporting or conversion evidence only when you need it.</p>
     </div>
-    {#if hasFilters}<a class="button-secondary" href="/transactions">Clear filters</a>{/if}
+    {#if hasFilters}<a class="button-secondary" href={withMarket('/transactions', market)}>Clear filters</a>{/if}
   </header>
 
   {#if pageError}
@@ -217,6 +256,8 @@
     {from}
     {to}
     {sort}
+    {market}
+    reportingCurrency={$marketState.settings?.baseCurrency ?? data.items[0]?.currencyBase ?? 'CAD'}
     onFilter={applyFilters}
     onPage={changePage}
     onPageSize={changePageSize}

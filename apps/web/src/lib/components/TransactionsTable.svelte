@@ -1,7 +1,9 @@
 <script lang="ts">
-  import type { TransactionSort } from '@ledger/shared-types';
+  import type { ConversionIndicator, TransactionSort } from '@ledger/shared-types';
   import { money, shortDate } from '$lib/format.js';
+  import type { MarketSelection } from '$lib/market-scope.js';
   import CategoryCell from './CategoryCell.svelte';
+  import TransactionDetailDrawer from './TransactionDetailDrawer.svelte';
   import type { AccountView, CategoryView, TransactionPageView } from './phase1-types.js';
 
   export let data: TransactionPageView = { items: [], page: 1, pageSize: 25, total: 0, totalPages: 0 };
@@ -27,13 +29,39 @@
   export let onPage: (page: number) => void = () => undefined;
   export let onPageSize: (pageSize: number) => void = () => undefined;
   export let onCategorySave: (transactionId: string, categoryId: string, applyToMerchant: boolean) => Promise<void> = async () => undefined;
+  export let reportingCurrency = 'CAD';
+  export let market: MarketSelection = '';
+
+  let detailId = '';
+  let detailTrigger: HTMLButtonElement | null = null;
 
   function submit() {
     onFilter({ search, accountId, categoryId, direction, from, to, sort });
   }
 
-  function differs(left: string, right: string) {
-    return left !== right;
+  function indicators(transaction: TransactionPageView['items'][number]): ConversionIndicator[] {
+    if (Array.isArray(transaction.conversionIndicators)) return transaction.conversionIndicators;
+    const result: ConversionIndicator[] = [];
+    const hasFx = Boolean(
+      transaction.isFxFee
+      || transaction.fxFeeAmountNative != null
+      || (transaction.originalCurrency && transaction.originalCurrency !== transaction.currencyNative)
+    );
+    if (hasFx) result.push('fx');
+    const pending = transaction.valuationStatus === 'pending_fx' || transaction.amountBase == null;
+    if (pending) result.push('pending');
+    else if (!hasFx && (transaction.currencyNative !== transaction.currencyBase || transaction.amountNative !== transaction.amountBase)) result.push('converted');
+    return result;
+  }
+
+  function openDetails(id: string, trigger: HTMLButtonElement) {
+    detailId = id;
+    detailTrigger = trigger;
+  }
+
+  function closeDetails() {
+    detailId = '';
+    requestAnimationFrame(() => detailTrigger?.focus());
   }
 </script>
 
@@ -95,8 +123,8 @@
       <select bind:value={sort} on:change={submit}>
         <option value="booked_date_desc">Newest first</option>
         <option value="booked_date_asc">Oldest first</option>
-        <option value="amount_desc">Largest amount</option>
-        <option value="amount_asc">Smallest amount</option>
+        <option value="amount_desc">Largest amount ({reportingCurrency} reporting)</option>
+        <option value="amount_asc">Smallest amount ({reportingCurrency} reporting)</option>
       </select>
     </label>
     <button type="submit">Search</button>
@@ -110,7 +138,7 @@
           <th scope="col">Description</th>
           <th scope="col">Category</th>
           <th scope="col" class="number">Amount</th>
-          <th scope="col" class="number">Running balance</th>
+          <th scope="col"><span class="sr-only">Conversion details</span></th>
         </tr>
       </thead>
       <tbody>
@@ -147,32 +175,18 @@
               <td>
                 <CategoryCell {transaction} {categories} onSave={onCategorySave} />
               </td>
-              <td class:credit={Number(transaction.amountNative) < 0} class="number amount amount-stack">
-                {#if transaction.originalAmount != null && transaction.originalCurrency != null && (transaction.originalCurrency !== transaction.currencyNative || differs(transaction.originalAmount, transaction.amountNative))}
-                  <span><small>Original</small>{money(transaction.originalAmount, transaction.originalCurrency)}</span>
-                {/if}
-                <span><small>Posted</small>{money(transaction.amountNative, transaction.currencyNative)}</span>
-                {#if transaction.amountBase == null}
-                  <span class="pending"><small>Reporting</small>CAD valuation pending</span>
-                {:else if transaction.currencyBase !== transaction.currencyNative || differs(transaction.amountBase, transaction.amountNative)}
-                  <span class="reporting"><small>Reporting</small>{money(transaction.amountBase, transaction.currencyBase)}</span>
-                {/if}
-                {#if transaction.fxFeeAmountNative != null}
-                  <span class="fee"><small>Actual FX fee</small>{money(transaction.fxFeeAmountNative, transaction.currencyNative)}</span>
-                {:else if transaction.isFxFee}
-                  <span class="fee"><small>Standalone FX fee</small>Included above</span>
+              <td class:credit={Number(transaction.amountNative) < 0} class="number amount">
+                <strong>{money(transaction.amountNative, transaction.currencyNative)}</strong>
+                {#if indicators(transaction).length}
+                  <span class="badges">
+                    {#each indicators(transaction) as indicator}
+                      <span class:pending={indicator === 'pending'}>{indicator === 'fx' ? 'FX' : indicator === 'converted' ? 'Converted' : 'Pending'}</span>
+                    {/each}
+                  </span>
                 {/if}
               </td>
-              <td class="number balance">
-                {#if transaction.runningBalanceBase != null}
-                  {money(transaction.runningBalanceBase, transaction.currencyBase)}
-                {:else}
-                  {money(transaction.runningBalanceNative, transaction.currencyNative)}
-                  <small>CAD balance pending</small>
-                {/if}
-                {#if transaction.runningBalanceBase != null && transaction.runningBalanceNative && transaction.currencyNative !== transaction.currencyBase}
-                  <small>{money(transaction.runningBalanceNative, transaction.currencyNative)} native</small>
-                {/if}
+              <td class="details-cell">
+                <button class="detail-button" type="button" aria-label={`View conversion details for ${transaction.merchantName ?? transaction.description}`} on:click={(event) => openDetails(transaction.id, event.currentTarget)}>Details</button>
               </td>
             </tr>
           {/each}
@@ -215,6 +229,8 @@
     </nav>
   {/if}
 </section>
+
+{#if detailId}<TransactionDetailDrawer transactionId={detailId} {market} onClose={closeDetails} />{/if}
 
 <style>
   .transactions {
@@ -308,7 +324,7 @@
 
   table {
     width: 100%;
-    min-width: 900px;
+    min-width: 820px;
     border-collapse: collapse;
   }
 
@@ -332,21 +348,19 @@
   tbody tr:not(.placeholder):hover { background: #faf9f5; }
   td { font-size: 0.75rem; }
   .number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .amount-stack { display: grid; justify-items: end; gap: 0.18rem; }
-  .amount-stack > span { display: flex; align-items: baseline; justify-content: flex-end; gap: 0.35rem; }
-  .amount-stack small { color: var(--muted); font-size: 0.54rem; font-weight: 750; text-transform: uppercase; }
-  .amount-stack .reporting { color: var(--forest); }
-  .amount-stack .pending { color: var(--muted); font-size: 0.64rem; }
-  .amount-stack .fee { color: var(--coral); font-size: 0.64rem; }
   .date { color: var(--muted); white-space: nowrap; }
   .date small { display: block; margin-top: 0.12rem; font-size: 0.62rem; }
   .description { display: grid; gap: 0.17rem; min-width: 220px; }
   .description strong { font-size: 0.77rem; }
   .description span { max-width: 42ch; overflow: hidden; color: var(--muted); font-size: 0.65rem; text-overflow: ellipsis; white-space: nowrap; }
   .amount { color: var(--ink); font-weight: 800; }
+  .amount > strong { display: block; font-size: 0.75rem; }
   .amount.credit { color: #237a64; }
-  .balance { color: var(--muted); }
-  .balance small { display: block; margin-top: 0.15rem; font-size: 0.58rem; }
+  .badges { display: flex; margin-top: 0.3rem; justify-content: flex-end; flex-wrap: wrap; gap: 0.25rem; }
+  .badges > span { padding: 0.18rem 0.34rem; color: #285049; border-radius: 999px; background: #e2f1ec; font-size: 0.51rem; font-weight: 850; }
+  .badges > span.pending { color: #765c19; background: #f5e8bd; }
+  .details-cell { width: 1%; text-align: right; }
+  .detail-button { min-height: 32px; padding: 0.35rem 0.55rem; color: var(--forest); border: 1px solid var(--line); border-radius: 8px; background: white; font-size: 0.62rem; font-weight: 800; }
 
   .empty {
     display: grid;

@@ -1,19 +1,52 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import BrandMark from '$lib/components/BrandMark.svelte';
+  import MarketScopeSelector from '$lib/components/MarketScopeSelector.svelte';
+  import SetupPrompt from '$lib/components/SetupPrompt.svelte';
+  import { marketState, withMarket } from '$lib/market-scope.js';
   import '../app.css';
 
-  const navigation = [
+  const desktopNavigation = [
     { href: '/', label: 'Dashboard', shortLabel: 'Home', icon: '⌂' },
     { href: '/transactions', label: 'Transactions', shortLabel: 'Activity', icon: '↕' },
     { href: '/accounts', label: 'Accounts', shortLabel: 'Accounts', icon: '▣' },
     { href: '/categories', label: 'Categories', shortLabel: 'Categories', icon: '◫' },
     { href: '/insights', label: 'Insights', shortLabel: 'Insights', icon: '◉' },
-    { href: '/imports', label: 'Imports', shortLabel: 'Imports', icon: '↑' }
+    { href: '/imports', label: 'Imports', shortLabel: 'Imports', icon: '↑' },
+    { href: '/more', label: 'More', shortLabel: 'More', icon: '•••' }
+  ] as const;
+
+  const mobileNavigation = [
+    { href: '/', label: 'Home', icon: '⌂' },
+    { href: '/transactions', label: 'Activity', icon: '↕' },
+    { href: '/insights', label: 'Insights', icon: '◉' },
+    { href: '/more', label: 'More', icon: '•••' }
   ] as const;
 
   function isCurrent(href: string) {
     return href === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(href);
+  }
+
+  function isMobileCurrent(href: string) {
+    if (href === '/more') {
+      return ['/more', '/accounts', '/categories', '/imports', '/settings'].some((path) =>
+        $page.url.pathname.startsWith(path)
+      );
+    }
+    return isCurrent(href);
+  }
+
+  function isDesktopCurrent(href: string) {
+    return href === '/more' && $page.url.pathname.startsWith('/settings') ? true : isCurrent(href);
+  }
+
+  $: showsMarketScope = $page.url.pathname === '/'
+    || ['/transactions', '/accounts', '/insights', '/imports'].some((path) => $page.url.pathname.startsWith(path));
+
+  function navigationHref(href: string) {
+    return ['/', '/transactions', '/accounts', '/insights', '/imports'].includes(href) && $marketState.ready
+      ? withMarket(href, $marketState.market)
+      : href;
   }
 </script>
 
@@ -27,8 +60,8 @@
     </a>
 
     <nav class="desktop-nav" aria-label="Primary navigation">
-      {#each navigation as item}
-        <a class:active={isCurrent(item.href)} href={item.href} aria-current={isCurrent(item.href) ? 'page' : undefined}>
+      {#each desktopNavigation as item}
+        <a class:active={isDesktopCurrent(item.href)} href={navigationHref(item.href)} aria-current={isDesktopCurrent(item.href) ? 'page' : undefined}>
           {item.label}
         </a>
       {/each}
@@ -37,6 +70,11 @@
     <div class="privacy"><span aria-hidden="true"></span> Self-hosted &amp; private</div>
   </div>
 </header>
+
+{#if showsMarketScope}
+  <MarketScopeSelector />
+  <SetupPrompt />
+{/if}
 
 <main id="main-content" class="app-main">
   <slot />
@@ -48,10 +86,10 @@
 </footer>
 
 <nav class="mobile-nav" aria-label="Mobile navigation">
-  {#each navigation as item}
-    <a class:active={isCurrent(item.href)} href={item.href} aria-current={isCurrent(item.href) ? 'page' : undefined}>
+  {#each mobileNavigation as item}
+    <a class:active={isMobileCurrent(item.href)} href={navigationHref(item.href)} aria-current={isMobileCurrent(item.href) ? 'page' : undefined}>
       <span aria-hidden="true">{item.icon}</span>
-      {item.shortLabel}
+      {item.label}
     </a>
   {/each}
 </nav>
@@ -168,7 +206,7 @@
     .header-inner { grid-template-columns: auto 1fr; }
     .desktop-nav { display: none; }
     .privacy { justify-self: end; }
-    .app-footer { padding-bottom: 6.2rem; }
+    .app-footer { display: none; }
 
     .mobile-nav {
       position: fixed;
@@ -177,7 +215,7 @@
       bottom: max(0.6rem, env(safe-area-inset-bottom));
       left: 0.6rem;
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       overflow: hidden;
       padding: 0.3rem;
       border: 1px solid rgb(255 255 255 / 12%);

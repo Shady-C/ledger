@@ -42,7 +42,7 @@
   <div class="chart-shell">
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="trend-title trend-description">
       <title id="trend-title">{label}</title>
-      <desc id="trend-description">Monthly CAD spending from {periodLabel(ordered[0]!.period)} to {periodLabel(ordered[ordered.length - 1]!.period)}.</desc>
+      <desc id="trend-description">Monthly {currency} spending from {periodLabel(ordered[0]!.period)} to {periodLabel(ordered[ordered.length - 1]!.period)}.</desc>
       <line x1="0" x2={width} y1={plotBottom} y2={plotBottom} class="axis" />
       {#each ordered as point, index}
         {@const renderedHeight = barHeight(point.spending)}

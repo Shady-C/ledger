@@ -4,6 +4,7 @@
 
   export let transactions: TransactionView[] = [];
   export let loading = false;
+  export let viewAllHref = '/transactions';
 </script>
 
 <section class="panel recent" aria-labelledby="recent-transactions-title">
@@ -12,7 +13,7 @@
       <h2 id="recent-transactions-title">Recent transactions</h2>
       <p>The latest activity across every account.</p>
     </div>
-    <a class="text-button" href="/transactions">View all <span aria-hidden="true">→</span></a>
+    <a class="text-button" href={viewAllHref}>View all <span aria-hidden="true">→</span></a>
   </div>
 
   {#if loading}

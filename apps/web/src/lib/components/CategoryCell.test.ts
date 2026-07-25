@@ -41,6 +41,7 @@ const transaction: TransactionView = {
   fxFeeAmountNative: null,
   isFxFee: false,
   valuationStatus: 'valued',
+  conversionIndicators: [],
   direction: 'debit',
   runningBalance: '1200.00',
   runningBalanceNative: '1200.00',

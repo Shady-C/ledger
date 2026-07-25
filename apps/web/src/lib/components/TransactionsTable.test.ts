@@ -8,7 +8,7 @@ import type { TransactionView } from './phase1-types.js';
 
 afterEach(cleanup);
 
-const common: Omit<TransactionView, 'id' | 'description' | 'amountNative' | 'currencyNative' | 'originalAmount' | 'originalCurrency' | 'amountBase' | 'fxRate' | 'fxRateDate' | 'fxFeeAmountNative' | 'isFxFee' | 'valuationStatus' | 'runningBalance' | 'runningBalanceNative' | 'runningBalanceBase'> = {
+const common: Omit<TransactionView, 'id' | 'description' | 'amountNative' | 'currencyNative' | 'originalAmount' | 'originalCurrency' | 'amountBase' | 'fxRate' | 'fxRateDate' | 'fxFeeAmountNative' | 'isFxFee' | 'valuationStatus' | 'conversionIndicators' | 'runningBalance' | 'runningBalanceNative' | 'runningBalanceBase'> = {
   accountId: '22222222-2222-4222-8222-222222222222',
   accountName: 'Travel account',
   bookedDate: '2026-07-19',
@@ -34,6 +34,7 @@ function transaction(overrides: Partial<TransactionView> & Pick<TransactionView,
     fxFeeAmountNative: null,
     isFxFee: false,
     valuationStatus: 'valued',
+    conversionIndicators: [],
     runningBalance: overrides.amountNative,
     runningBalanceNative: overrides.amountNative,
     runningBalanceBase: overrides.amountNative,
@@ -41,8 +42,8 @@ function transaction(overrides: Partial<TransactionView> & Pick<TransactionView,
   };
 }
 
-describe('TransactionsTable amount stack', () => {
-  it('shows three monetary layers, suppresses duplicates, and explains pending CAD values', () => {
+describe('TransactionsTable amount hierarchy', () => {
+  it('shows one posted amount with compact conversion indicators', () => {
     const items = [
       transaction({
         id: '55555555-5555-4555-8555-555555555551',
@@ -54,6 +55,7 @@ describe('TransactionsTable amount stack', () => {
         amountBase: '-142.90',
         fxRate: '0.00052926',
         fxFeeAmountNative: '5000.00',
+        conversionIndicators: ['fx'],
         runningBalance: '730000.00',
         runningBalanceNative: '730000.00',
         runningBalanceBase: '386.00'
@@ -62,9 +64,9 @@ describe('TransactionsTable amount stack', () => {
         id: '55555555-5555-4555-8555-555555555552',
         description: 'Native CAD activity',
         amountNative: '-25.00',
-        currencyNative: 'CAD',
-        originalAmount: '-25.00',
-        originalCurrency: 'CAD'
+        currencyNative: 'USD',
+        amountBase: '-34.00',
+        conversionIndicators: ['converted']
       }),
       transaction({
         id: '55555555-5555-4555-8555-555555555553',
@@ -75,6 +77,7 @@ describe('TransactionsTable amount stack', () => {
         fxRate: null,
         fxRateDate: null,
         valuationStatus: 'pending_fx',
+        conversionIndicators: ['pending'],
         runningBalance: '960.00',
         runningBalanceNative: '960.00',
         runningBalanceBase: null
@@ -89,10 +92,11 @@ describe('TransactionsTable amount stack', () => {
       }
     });
 
-    expect(screen.getAllByText('Original')).toHaveLength(1);
-    expect(screen.getAllByText('Posted')).toHaveLength(3);
-    expect(screen.getAllByText('Reporting')).toHaveLength(2);
-    expect(screen.getByText('CAD valuation pending')).toBeTruthy();
-    expect(screen.getByText('Actual FX fee')).toBeTruthy();
+    expect(screen.getByText(/270,000\.00/)).toBeTruthy();
+    expect(screen.getByText('FX')).toBeTruthy();
+    expect(screen.getByText('Converted')).toBeTruthy();
+    expect(screen.getByText('Pending')).toBeTruthy();
+    expect(screen.queryByText('Running balance')).toBeNull();
+    expect(screen.getAllByRole('button', { name: /View conversion details/ })).toHaveLength(3);
   });
 });

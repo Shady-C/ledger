@@ -6,6 +6,12 @@
   import UploadPanel from '$lib/components/UploadPanel.svelte';
   import { readJson, readOptionalJson } from '$lib/components/api-client.js';
   import type { AccountView } from '$lib/components/phase1-types.js';
+  import {
+    initializeMarketScope,
+    marketLabel,
+    withMarket,
+    type MarketSelection
+  } from '$lib/market-scope.js';
 
   type JobListItem = {
     id: string;
@@ -29,6 +35,7 @@
   let loading = true;
   let historyLoading = true;
   let pageError = '';
+  let market: MarketSelection = '';
 
   async function loadHistory() {
     historyLoading = true;
@@ -46,7 +53,7 @@
     loading = true;
     pageError = '';
     try {
-      const accountResult = await readJson<AccountsResponse>('/api/accounts');
+      const accountResult = await readJson<AccountsResponse>(withMarket('/api/accounts', market));
       accounts = accountResult.accounts;
       await loadHistory();
     } catch (error) {
@@ -60,7 +67,22 @@
     await loadHistory();
   }
 
-  onMount(load);
+  async function initialize() {
+    const state = await initializeMarketScope(new URL(window.location.href));
+    market = state.market;
+    await load();
+  }
+
+  function handleMarketChange(event: Event) {
+    market = (event as CustomEvent<{ market: MarketSelection }>).detail.market;
+    void load();
+  }
+
+  onMount(() => {
+    void initialize();
+    window.addEventListener('ledger:market-change', handleMarketChange);
+    return () => window.removeEventListener('ledger:market-change', handleMarketChange);
+  });
 </script>
 
 <svelte:head>
@@ -71,7 +93,7 @@
 <div class="page">
   <header class="page-header">
     <div class="page-header-copy">
-      <p class="eyebrow">Statement inbox</p>
+      <p class="eyebrow">{marketLabel(market)} statement inbox</p>
       <h1>From statement to reconciled record.</h1>
       <p class="lede">Import known formats directly. Unknown CSV and spreadsheet layouts can receive a redacted AI column map before any financial row is persisted.</p>
     </div>
@@ -82,7 +104,7 @@
   {/if}
 
   {#if !loading && accounts.length === 0}
-    <div class="status-banner info"><strong>Add an account first.</strong><span>Each statement must be tied to an asset account or credit card before import.</span><a class="text-button" href="/accounts">Go to accounts</a></div>
+    <div class="status-banner info"><strong>No accounts in this scope.</strong><span>Each statement must be tied to an account in {marketLabel(market)} before import.</span><a class="text-button" href={withMarket('/accounts', market)}>Go to accounts</a></div>
   {/if}
 
   <UploadPanel {accounts} onComplete={importComplete} />

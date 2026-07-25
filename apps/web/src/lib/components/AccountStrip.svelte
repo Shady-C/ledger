@@ -1,11 +1,11 @@
 <script lang="ts">
   import { accountKind, money } from '$lib/format.js';
   import type { AccountView } from './phase1-types.js';
-  import UtilizationMeter from './UtilizationMeter.svelte';
 
   export let accounts: AccountView[] = [];
   export let loading = false;
   export let selected = '';
+  export let showAll = true;
   export let onSelect: (id: string) => void = () => undefined;
 </script>
 
@@ -33,11 +33,13 @@
     </div>
   {:else}
     <div class="cards">
-      <button class:active={selected === ''} type="button" on:click={() => onSelect('')}>
-        <span class="eyebrow">All accounts</span>
-        <strong>{accounts.length}</strong>
-        <span class="meta">Consolidated view</span>
-      </button>
+      {#if showAll}
+        <button class:active={selected === ''} type="button" on:click={() => onSelect('')}>
+          <span class="eyebrow">All accounts</span>
+          <strong>{accounts.length}</strong>
+          <span class="meta">Consolidated view</span>
+        </button>
+      {/if}
       {#each accounts as account}
         <button class:active={selected === account.id} type="button" on:click={() => onSelect(account.id)}>
           <span class="eyebrow">{account.institutionName ?? accountKind(account.kind)}</span>
@@ -46,17 +48,7 @@
             {account.displayName}{account.accountRefMasked ? ` · ${account.accountRefMasked}` : ''}
             · {account.balanceBasis === 'net_activity' ? 'Net activity' : 'Current balance'}
           </span>
-          {#if account.kind === 'credit_card'}
-            <UtilizationMeter
-              compact
-              label={`${account.displayName} utilization`}
-              value={account.utilizationPercent}
-              used={account.usedCredit}
-              limit={account.creditLimit}
-              available={account.availableCredit}
-              currency={account.nativeCurrency}
-            />
-          {/if}
+          {#if account.marketCode == null}<span class="market-needed">Market needed</span>{/if}
         </button>
       {/each}
     </div>
@@ -161,7 +153,7 @@
     letter-spacing: -0.04em;
   }
 
-  button :global(.utilization) { width: 100%; }
+  .market-needed { padding: 0.24rem 0.45rem; color: #765c19; border-radius: 999px; background: #f5e8bd; font-size: 0.56rem; font-weight: 800; }
 
   .skeleton {
     min-width: 220px;

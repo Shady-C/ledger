@@ -2,7 +2,10 @@
   import { onMount } from 'svelte';
   import type {
     AccountsResponse,
+    BalanceResponse,
+    CashflowResponse,
     CategoriesResponse,
+    FxAnalyticsResponse,
     InsightDimension,
     InsightFinding,
     InsightFindingSeverity,
@@ -12,8 +15,6 @@
     InsightRange,
     InsightRecurringResponse,
     InsightSeasonalityResponse,
-    InsightSensitivity,
-    InsightSettingsResponse,
     InsightSummaryResponse,
     InsightTrendsResponse,
     RecurringCadence,
@@ -23,17 +24,27 @@
 
   import FindingEvidence from '$lib/components/insights/FindingEvidence.svelte';
   import TrendChart from '$lib/components/insights/TrendChart.svelte';
+  import BalanceChart from '$lib/charts/BalanceChart.svelte';
+  import CashflowChart from '$lib/charts/CashflowChart.svelte';
   import { dateTime, readJson, sendJson } from '$lib/components/api-client.js';
   import { money, shortDate } from '$lib/format.js';
+  import {
+    initializeMarketScope,
+    marketLabel,
+    marketState,
+    withMarket,
+    type MarketSelection
+  } from '$lib/market-scope.js';
 
-  type Tab = 'overview' | 'trends' | 'recurring' | 'findings';
+  type Tab = 'overview' | 'trends' | 'recurring' | 'findings' | 'fx';
   type RecurringDraft = { cadence: RecurringCadence; expectedAmount: string };
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
     { id: 'trends', label: 'Trends' },
     { id: 'recurring', label: 'Recurring' },
-    { id: 'findings', label: 'Findings' }
+    { id: 'findings', label: 'Findings' },
+    { id: 'fx', label: 'FX' }
   ];
   const findingTypes: InsightFindingType[] = [
     'unusual_amount',
@@ -68,8 +79,10 @@
   let seasonality: InsightSeasonalityResponse | null = null;
   let recurring: InsightRecurringResponse | null = null;
   let findings: InsightFindingsResponse | null = null;
-  let sensitivity: InsightSensitivity = 'balanced';
-  let savedSensitivity: InsightSensitivity = 'balanced';
+  let balance: BalanceResponse = { currency: 'CAD', basis: 'net_activity', points: [] };
+  let cashflow: CashflowResponse = { currency: 'CAD', points: [] };
+  let fx: FxAnalyticsResponse | null = null;
+  let market: MarketSelection = '';
   let recurringStatus: RecurringStatus | '' = '';
   let recurringCadence: RecurringCadence | '' = '';
   let findingStatus: InsightFindingStatus | '' = '';
@@ -81,21 +94,41 @@
   let loading = true;
   let refreshingTrends = false;
   let pageError = '';
+  let analyticsRebuilding = false;
   let message = '';
   let actionId = '';
-  let savingSettings = false;
-  let rebuilding = false;
 
   $: ledgerTrendPoints = trends?.points.filter((point) => point.dimensionType === 'ledger') ?? [];
   $: displayedTrendPoints = trendGroupBy === 'ledger' ? ledgerTrendPoints : trends?.points ?? [];
+  $: reportingCurrency = summary?.baseCurrency ?? trends?.baseCurrency ?? $marketState.settings?.baseCurrency ?? balance.currency ?? 'CAD';
 
   function queryString(extra: Record<string, string | number | undefined> = {}) {
     const params = new URLSearchParams({ range });
+    if (market) params.set('market', market);
     if (accountId) params.set('accountId', accountId);
     if (categoryId) params.set('categoryId', categoryId);
     if (merchantId) params.set('merchantId', merchantId);
     for (const [key, value] of Object.entries(extra)) {
       if (value !== '' && value !== undefined) params.set(key, String(value));
+    }
+    return params.toString();
+  }
+
+  function analyticsQuery() {
+    const params = new URLSearchParams();
+    if (market) params.set('market', market);
+    if (accountId) params.set('accountId', accountId);
+    return params.toString();
+  }
+
+  function fxAnalyticsQuery() {
+    const params = new URLSearchParams(analyticsQuery());
+    if (range !== 'all') {
+      const months = Number.parseInt(range, 10);
+      const today = new Date();
+      const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - months + 1, 1));
+      params.set('from', start.toISOString().slice(0, 10));
+      params.set('to', today.toISOString().slice(0, 10));
     }
     return params.toString();
   }
@@ -137,30 +170,35 @@
   async function load() {
     loading = true;
     pageError = '';
+    analyticsRebuilding = false;
     try {
-      const [summaryResult, trendsResult, seasonalityResult, recurringResult, findingsResult, settingsResult, accountResult, categoryResult] = await Promise.all([
+      const [summaryResult, trendsResult, seasonalityResult, recurringResult, findingsResult, accountResult, categoryResult, balanceResult, cashflowResult, fxResult] = await Promise.all([
         readJson<InsightSummaryResponse>(`/api/insights/summary?${queryString()}`),
         readJson<InsightTrendsResponse>(`/api/insights/trends?${queryString({ groupBy: trendGroupBy })}`),
         readJson<InsightSeasonalityResponse>(`/api/insights/seasonality?${queryString()}`),
         readJson<InsightRecurringResponse>(`/api/insights/recurring?${queryString({ page: recurringPage, status: recurringStatus || undefined, cadence: recurringCadence || undefined })}`),
         readJson<InsightFindingsResponse>(`/api/insights/findings?${queryString({ page: findingsPage, status: findingStatus || undefined, severity: findingSeverity || undefined, type: findingType || undefined })}`),
-        readJson<InsightSettingsResponse>('/api/insights/settings'),
-        readJson<AccountsResponse>('/api/accounts'),
-        readJson<CategoriesResponse>('/api/categories')
+        readJson<AccountsResponse>(withMarket('/api/accounts', market)),
+        readJson<CategoriesResponse>('/api/categories'),
+        readJson<BalanceResponse>(`/api/analytics/balance${analyticsQuery() ? `?${analyticsQuery()}` : ''}`),
+        readJson<CashflowResponse>(`/api/analytics/cashflow${analyticsQuery() ? `?${analyticsQuery()}` : ''}`),
+        readJson<FxAnalyticsResponse>(`/api/analytics/fx${fxAnalyticsQuery() ? `?${fxAnalyticsQuery()}` : ''}`)
       ]);
       summary = summaryResult;
       trends = trendsResult;
       seasonality = seasonalityResult;
       recurring = recurringResult;
       findings = findingsResult;
-      sensitivity = settingsResult.settings.sensitivity;
-      savedSensitivity = settingsResult.settings.sensitivity;
       accounts = accountResult.accounts;
       categories = categoryResult.categories;
+      balance = balanceResult;
+      cashflow = cashflowResult;
+      fx = fxResult;
       syncMerchantOptions(recurringResult.series, findingsResult.findings, trendsResult.points);
       syncRecurringDrafts(recurringResult.series);
     } catch (error) {
       pageError = error instanceof Error ? error.message : 'Insights are temporarily unavailable.';
+      analyticsRebuilding = /rebuild|generation.*currenc|analytics.*prepar/i.test(pageError);
     } finally {
       loading = false;
     }
@@ -253,41 +291,6 @@
     summary = await readJson<InsightSummaryResponse>(`/api/insights/summary?${queryString()}`);
   }
 
-  async function saveSensitivity() {
-    if (sensitivity === savedSensitivity || savingSettings) return;
-    savingSettings = true;
-    pageError = '';
-    try {
-      const response = await sendJson<InsightSettingsResponse>('/api/insights/settings', 'PATCH', {
-        sensitivity
-      });
-      sensitivity = response.settings.sensitivity;
-      savedSensitivity = response.settings.sensitivity;
-      message = response.refresh
-        ? `Insight sensitivity was saved and a full refresh was queued (${response.refresh.jobId.slice(0, 8)}…).`
-        : 'Insight sensitivity was saved.';
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'Sensitivity could not be saved.';
-      sensitivity = savedSensitivity;
-    } finally {
-      savingSettings = false;
-    }
-  }
-
-  async function rebuild() {
-    if (rebuilding) return;
-    rebuilding = true;
-    pageError = '';
-    try {
-      const accepted = await sendJson<{ jobId: string }>('/api/insights/rebuild', 'POST', { mode: 'full' });
-      message = `Full analytics refresh queued (${accepted.jobId.slice(0, 8)}…). Existing published Insights remain visible while it runs.`;
-    } catch (error) {
-      pageError = error instanceof Error ? error.message : 'The analytics refresh could not be queued.';
-    } finally {
-      rebuilding = false;
-    }
-  }
-
   function activateTab(tab: Tab) {
     activeTab = tab;
   }
@@ -316,11 +319,26 @@
     return `${amount > 0 ? '+' : ''}${amount.toFixed(1)}%`;
   }
 
-  function runStatus(value: string) {
-    return value === 'succeeded' ? 'Up to date' : label(value);
+  async function initialize() {
+    const state = await initializeMarketScope(new URL(window.location.href));
+    market = state.market;
+    await load();
   }
 
-  onMount(load);
+  function handleMarketChange(event: Event) {
+    market = (event as CustomEvent<{ market: MarketSelection }>).detail.market;
+    accountId = '';
+    if (trendGroupBy === 'account') trendGroupBy = 'ledger';
+    recurringPage = 1;
+    findingsPage = 1;
+    void load();
+  }
+
+  onMount(() => {
+    void initialize();
+    window.addEventListener('ledger:market-change', handleMarketChange);
+    return () => window.removeEventListener('ledger:market-change', handleMarketChange);
+  });
 </script>
 
 <svelte:head>
@@ -331,7 +349,7 @@
 <div class="page insights-page">
   <header class="page-header">
     <div class="page-header-copy">
-      <p class="eyebrow">Deterministic analytics</p>
+      <p class="eyebrow">{marketLabel(market)} deterministic analytics</p>
       <h1>See the pattern. Inspect the proof.</h1>
       <p class="lede">Trends, recurring activity, and unusual events are calculated from your ledger. Every finding keeps its evidence and review state.</p>
     </div>
@@ -367,20 +385,19 @@
           {#each merchantOptions as merchant}<option value={merchant.id}>{merchant.name}</option>{/each}
         </select>
       </label>
-      <button class="button-secondary" type="button" disabled={rebuilding} on:click={rebuild}>{rebuilding ? 'Queuing…' : 'Rebuild insights'}</button>
     </div>
   </header>
 
   {#if pageError}
-    <div class="status-banner" role="alert"><strong>Insights need attention.</strong><span>{pageError}</span><button class="button-secondary" type="button" on:click={load}>Try again</button></div>
+    <div class:info={analyticsRebuilding} class="status-banner" role={analyticsRebuilding ? 'status' : 'alert'}><strong>{analyticsRebuilding ? 'Insights are rebuilding.' : 'Insights need attention.'}</strong><span>{pageError}</span><button class="button-secondary" type="button" on:click={load}>Check again</button></div>
   {:else if message}
     <div class="status-banner success" role="status"><strong>Updated.</strong><span>{message}</span><button class="text-button" type="button" on:click={() => (message = '')}>Dismiss</button></div>
   {/if}
 
   {#if summary?.coverage.status === 'partial'}
     <div class="status-banner info" role="status">
-      <strong>CAD totals are partial.</strong>
-      <span>{summary.coverage.unvaluedTransactionCount} transaction{summary.coverage.unvaluedTransactionCount === 1 ? '' : 's'} await CAD valuation and are excluded from consolidated totals.</span>
+      <strong>{reportingCurrency} totals are partial.</strong>
+      <span>{summary.coverage.unvaluedTransactionCount} transaction{summary.coverage.unvaluedTransactionCount === 1 ? '' : 's'} await {reportingCurrency} valuation and are excluded from consolidated totals.</span>
     </div>
   {/if}
 
@@ -394,6 +411,7 @@
         aria-controls={`insights-panel-${tab.id}`}
         tabindex={activeTab === tab.id ? 0 : -1}
         class:active={activeTab === tab.id}
+        disabled={loading}
         on:click={() => activateTab(tab.id)}
         on:keydown={(event) => tabKeydown(event, index)}
       >
@@ -405,49 +423,43 @@
 
   {#if loading}
     <div class="loading-grid" aria-label="Loading Insights"><div class="skeleton-block"></div><div class="skeleton-block"></div><div class="skeleton-block"></div></div>
+  {:else if analyticsRebuilding && !summary}
+    <div class="panel empty-state" role="status"><strong>Preparing {reportingCurrency} Insights</strong><p>Transactions and accounts remain available while Ledger publishes a matching analytics generation. Check again shortly or review the job in Advanced settings.</p><a class="button-secondary" href="/settings">Open Advanced settings</a></div>
   {:else if activeTab === 'overview'}
     <div id="insights-panel-overview" role="tabpanel" aria-labelledby="insights-tab-overview" class="tab-panel">
       <div class="metric-grid">
-        <article class="metric-card"><span>Spending</span><strong>{money(summary?.totals.spending ?? '0', 'CAD')}</strong><small>{summary?.spendingMonthOverMonth ? `${signedPercent(summary.spendingMonthOverMonth.changePercent)} vs prior month` : 'No prior month comparison'}</small></article>
-        <article class="metric-card"><span>Inflow</span><strong>{money(summary?.totals.inflow ?? '0', 'CAD')}</strong><small>Valued activity in this range</small></article>
-        <article class="metric-card"><span>Net cash flow</span><strong class:negative={Number(summary?.totals.netCashflow ?? '0') < 0}>{money(summary?.totals.netCashflow ?? '0', 'CAD')}</strong><small>{summary?.spendingYearOverYear ? `${signedPercent(summary.spendingYearOverYear.changePercent)} spending vs last year` : 'Year-over-year pending history'}</small></article>
+        <article class="metric-card"><span>Spending</span><strong>{money(summary?.totals.spending ?? '0', reportingCurrency)}</strong><small>{summary?.spendingMonthOverMonth ? `${signedPercent(summary.spendingMonthOverMonth.changePercent)} vs prior month` : 'No prior month comparison'}</small></article>
+        <article class="metric-card"><span>Inflow</span><strong>{money(summary?.totals.inflow ?? '0', reportingCurrency)}</strong><small>Valued activity in this range</small></article>
+        <article class="metric-card"><span>Net cash flow</span><strong class:negative={Number(summary?.totals.netCashflow ?? '0') < 0}>{money(summary?.totals.netCashflow ?? '0', reportingCurrency)}</strong><small>{summary?.spendingYearOverYear ? `${signedPercent(summary.spendingYearOverYear.changePercent)} spending vs last year` : 'Year-over-year pending history'}</small></article>
         <article class="metric-card accent"><span>Needs review</span><strong>{summary?.findings.unread ?? 0}</strong><small>{summary?.findings.confirmed ?? 0} confirmed · {summary?.findings.dismissed ?? 0} dismissed</small></article>
       </div>
 
       <div class="overview-grid">
         <article class="panel trend-panel">
-          <div class="panel-heading"><div><h2>Monthly spending</h2><p>CAD-valued spending with partial months clearly marked.</p></div><button class="text-button" type="button" on:click={() => (activeTab = 'trends')}>Explore trends</button></div>
-          <TrendChart points={ledgerTrendPoints} currency="CAD" />
+          <div class="panel-heading"><div><h2>Monthly spending</h2><p>{reportingCurrency}-valued spending with partial months clearly marked.</p></div><button class="text-button" type="button" on:click={() => (activeTab = 'trends')}>Explore trends</button></div>
+          <TrendChart points={ledgerTrendPoints} currency={reportingCurrency} />
         </article>
         <div class="side-stack">
           <article class="panel summary-card">
             <div class="panel-heading"><div><h2>Recurring activity</h2><p>Expected dates are recurrence metadata, not a cash-flow forecast.</p></div></div>
-            <dl><div><dt>Active series</dt><dd>{summary?.recurring.activeSeries ?? 0}</dd></div><div><dt>Overdue</dt><dd>{summary?.recurring.overdueSeries ?? 0}</dd></div><div><dt>Monthly equivalent</dt><dd>{money(summary?.recurring.expectedMonthlyAmount ?? '0', 'CAD')}</dd></div></dl>
+            <dl><div><dt>Active series</dt><dd>{summary?.recurring.activeSeries ?? 0}</dd></div><div><dt>Overdue</dt><dd>{summary?.recurring.overdueSeries ?? 0}</dd></div><div><dt>Monthly equivalent</dt><dd>{money(summary?.recurring.expectedMonthlyAmount ?? '0', reportingCurrency)}</dd></div></dl>
             <button class="button-secondary full-button" type="button" on:click={() => (activeTab = 'recurring')}>Review recurring activity</button>
-          </article>
-          <article class="panel summary-card">
-            <div class="panel-heading"><div><h2>Analytics health</h2><p>Readers always see the last completely published generation.</p></div></div>
-            {#if summary?.latestRun}
-              <dl><div><dt>Status</dt><dd>{runStatus(summary.latestRun.status)}</dd></div><div><dt>Mode</dt><dd>{label(summary.latestRun.mode)}</dd></div><div><dt>Finished</dt><dd>{dateTime(summary.latestRun.finishedAt)}</dd></div><div><dt>Findings</dt><dd>{summary.latestRun.findingCount}</dd></div></dl>
-            {:else}
-              <p class="muted-copy">No analytics refresh has completed yet.</p>
-            {/if}
           </article>
         </div>
       </div>
 
-      <article class="panel settings-panel">
-        <div class="panel-heading"><div><h2>Detection sensitivity</h2><p>Balanced uses the documented materiality and robust-statistics defaults. Saving automatically queues a full refresh.</p></div></div>
-        <div class="settings-row"><label class="field"><span>Sensitivity</span><select bind:value={sensitivity}><option value="low">Low · fewer, larger deviations</option><option value="balanced">Balanced · recommended defaults</option><option value="high">High · more, smaller deviations</option></select></label><button class="button" type="button" disabled={sensitivity === savedSensitivity || savingSettings} on:click={saveSensitivity}>{savingSettings ? 'Saving…' : 'Save sensitivity'}</button></div>
-      </article>
+      <div class="position-grid">
+        <article class="panel"><div class="panel-heading"><div><h2>{balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Balance history'}</h2><p>{accountId ? 'Selected-account position.' : `Position across ${marketLabel(market).toLowerCase()}.`}</p></div><span class="pill">{balance.currency}</span></div><BalanceChart points={balance.points} currency={balance.currency} loading={false} label={balance.basis === 'net_activity' ? 'Cumulative net activity' : 'Running balance'} /></article>
+        <article class="panel"><div class="panel-heading"><div><h2>Cash flow</h2><p>Monthly inflows, outflows, and card payments.</p></div><span class="pill">{cashflow.currency}</span></div><CashflowChart points={cashflow.points} currency={cashflow.currency} loading={false} /></article>
+      </div>
     </div>
   {:else if activeTab === 'trends'}
     <div id="insights-panel-trends" role="tabpanel" aria-labelledby="insights-tab-trends" class="tab-panel">
       <article class="panel">
         <div class="panel-heading trends-heading"><div><h2>Monthly movement</h2><p>Choose a ledger total or break activity down by account, category, or merchant.</p></div><label class="field compact-field"><span>Break down by</span><select bind:value={trendGroupBy} disabled={Boolean(accountId || categoryId || merchantId)} on:change={loadTrends}><option value="ledger">Ledger total</option><option value="category">Category</option><option value="merchant">Merchant</option><option value="account">Account</option></select></label></div>
-        {#if refreshingTrends}<div class="skeleton-block"></div>{:else if trendGroupBy === 'ledger'}<TrendChart points={displayedTrendPoints} currency="CAD" />{/if}
+        {#if refreshingTrends}<div class="skeleton-block"></div>{:else if trendGroupBy === 'ledger'}<TrendChart points={displayedTrendPoints} currency={reportingCurrency} />{/if}
         {#if trendGroupBy !== 'ledger'}
-          <div class="table-scroll"><table><thead><tr><th>Month</th><th>{label(trendGroupBy)}</th><th>Spending</th><th>MoM</th><th>YoY</th><th>Inflow</th><th>Net cash flow</th><th>Coverage</th></tr></thead><tbody>{#each displayedTrendPoints as point}<tr><td>{shortDate(point.period)}</td><td>{point.dimensionName}</td><td>{money(point.spending, 'CAD')}</td><td>{signedPercent(point.monthOverMonth?.changePercent ?? null)}</td><td>{signedPercent(point.yearOverYear?.changePercent ?? null)}</td><td>{money(point.inflow, 'CAD')}</td><td>{money(point.netCashflow, 'CAD')}</td><td><span class:partial-pill={point.coverageStatus === 'partial'} class="pill">{label(point.coverageStatus)}</span></td></tr>{/each}</tbody></table></div>
+          <div class="table-scroll"><table><thead><tr><th>Month</th><th>{label(trendGroupBy)}</th><th>Spending</th><th>MoM</th><th>YoY</th><th>Inflow</th><th>Net cash flow</th><th>Coverage</th></tr></thead><tbody>{#each displayedTrendPoints as point}<tr><td>{shortDate(point.period)}</td><td>{point.dimensionName}</td><td>{money(point.spending, reportingCurrency)}</td><td>{signedPercent(point.monthOverMonth?.changePercent ?? null)}</td><td>{signedPercent(point.yearOverYear?.changePercent ?? null)}</td><td>{money(point.inflow, reportingCurrency)}</td><td>{money(point.netCashflow, reportingCurrency)}</td><td><span class:partial-pill={point.coverageStatus === 'partial'} class="pill">{label(point.coverageStatus)}</span></td></tr>{/each}</tbody></table></div>
         {/if}
       </article>
 
@@ -457,7 +469,7 @@
           {#if (trends?.movers.positive.length ?? 0) + (trends?.movers.negative.length ?? 0) === 0}
             <div class="empty-state"><strong>No comparable movers</strong><p>Two complete months are needed.</p></div>
           {:else}
-            <ul class="mover-list">{#each [...(trends?.movers.positive ?? []), ...(trends?.movers.negative ?? [])] as mover}<li><span><strong>{mover.dimensionName}</strong><small>{label(mover.dimensionType)}</small></span><span class:negative={Number(mover.changeAmount) < 0}>{signedPercent(mover.changePercent)}<small>{money(mover.changeAmount, 'CAD')}</small></span></li>{/each}</ul>
+            <ul class="mover-list">{#each [...(trends?.movers.positive ?? []), ...(trends?.movers.negative ?? [])] as mover}<li><span><strong>{mover.dimensionName}</strong><small>{label(mover.dimensionType)}</small></span><span class:negative={Number(mover.changeAmount) < 0}>{signedPercent(mover.changePercent)}<small>{money(mover.changeAmount, reportingCurrency)}</small></span></li>{/each}</ul>
           {/if}
         </article>
         <article class="panel">
@@ -465,7 +477,7 @@
           {#if seasonality?.status === 'insufficient_history'}
             <div class="empty-state"><strong>More history needed</strong><p>{seasonality.historyMonths} of {seasonality.requiredHistoryMonths} required months are available.</p></div>
           {:else}
-            <div class="seasonality-grid">{#each seasonality?.months ?? [] as month}<div><span>{month.monthName}</span><strong>{money(month.averageSpending, 'CAD')}</strong><small>{month.observationCount} observation{month.observationCount === 1 ? '' : 's'} · median {money(month.medianSpending, 'CAD')}</small></div>{/each}</div>
+            <div class="seasonality-grid">{#each seasonality?.months ?? [] as month}<div><span>{month.monthName}</span><strong>{money(month.averageSpending, reportingCurrency)}</strong><small>{month.observationCount} observation{month.observationCount === 1 ? '' : 's'} · median {money(month.medianSpending, reportingCurrency)}</small></div>{/each}</div>
           {/if}
         </article>
       </div>
@@ -494,7 +506,7 @@
       {/if}
       {#if recurring && recurring.totalPages > 1}<nav class="pagination" aria-label="Recurring pages"><button class="button-secondary" type="button" disabled={recurringPage <= 1} on:click={() => { recurringPage -= 1; void loadRecurring(); }}>Previous</button><span>Page {recurring.page} of {recurring.totalPages}</span><button class="button-secondary" type="button" disabled={recurringPage >= recurring.totalPages} on:click={() => { recurringPage += 1; void loadRecurring(); }}>Next</button></nav>{/if}
     </div>
-  {:else}
+  {:else if activeTab === 'findings'}
     <div id="insights-panel-findings" role="tabpanel" aria-labelledby="insights-tab-findings" class="tab-panel">
       <div class="filter-bar panel"><div><h2>Reviewable findings</h2><p>Nothing is silently deleted: findings keep their evidence and review history.</p></div><label class="field compact-field"><span>Status</span><select bind:value={findingStatus} on:change={() => { findingsPage = 1; void loadFindings(); }}><option value="">All statuses</option><option value="new">New</option><option value="confirmed">Confirmed</option><option value="dismissed">Dismissed</option><option value="resolved">Resolved</option></select></label><label class="field compact-field"><span>Severity</span><select bind:value={findingSeverity} on:change={() => { findingsPage = 1; void loadFindings(); }}><option value="">All severity</option><option value="info">Info</option><option value="warning">Warning</option><option value="critical">Critical</option></select></label><label class="field compact-field"><span>Type</span><select bind:value={findingType} on:change={() => { findingsPage = 1; void loadFindings(); }}><option value="">All finding types</option>{#each findingTypes as type}<option value={type}>{label(type)}</option>{/each}</select></label></div>
       {#if findings?.findings.length === 0}
@@ -512,6 +524,36 @@
         </div>
       {/if}
       {#if findings && findings.totalPages > 1}<nav class="pagination" aria-label="Finding pages"><button class="button-secondary" type="button" disabled={findingsPage <= 1} on:click={() => { findingsPage -= 1; void loadFindings(); }}>Previous</button><span>Page {findings.page} of {findings.totalPages}</span><button class="button-secondary" type="button" disabled={findingsPage >= findings.totalPages} on:click={() => { findingsPage += 1; void loadFindings(); }}>Next</button></nav>{/if}
+    </div>
+  {:else}
+    <div id="insights-panel-fx" role="tabpanel" aria-labelledby="insights-tab-fx" class="tab-panel">
+      <div class="metric-grid fx-metrics">
+        <article class="metric-card"><span>Total FX cost</span><strong>{money(fx?.totalFxCostBase ?? '0', fx?.baseCurrency ?? reportingCurrency)}</strong><small>Actual fees plus estimated rate markup</small></article>
+        <article class="metric-card"><span>Actual fees</span><strong>{money(fx?.totalExplicitFeeBase ?? '0', fx?.baseCurrency ?? reportingCurrency)}</strong><small>Explicit statement evidence</small></article>
+        <article class="metric-card"><span>Estimated markup</span><strong>{money(fx?.totalEstimatedMarkupBase ?? '0', fx?.baseCurrency ?? reportingCurrency)}</strong><small>Compared with dated reference rates</small></article>
+        <article class="metric-card accent"><span>Rates pending</span><strong>{fx?.missingRateCount ?? 0}</strong><small>Records awaiting reference evidence</small></article>
+      </div>
+      <article class="panel">
+        <div class="panel-heading"><div><h2>FX rate and cost evidence</h2><p>Account-posted amounts stay primary. This audit view separates actual bank evidence from estimates.</p></div></div>
+        {#if !fx || fx.transactions.length === 0}
+          <div class="empty-state"><strong>No FX activity in this scope</strong><p>Foreign purchases, conversion fees, and reporting-only conversions will appear here.</p></div>
+        {:else}
+          <div class="fx-list">
+            {#each fx.transactions as transaction}
+              <article>
+                <div class="fx-heading"><span><strong>{transaction.description}</strong><small>{transaction.accountName} · {shortDate(transaction.bookedDate)}</small></span><strong>{money(transaction.chargedAmountNative, transaction.nativeCurrency)}</strong></div>
+                <dl>
+                  <div><dt>Original</dt><dd>{transaction.foreignAmount && transaction.foreignCurrency ? money(transaction.foreignAmount, transaction.foreignCurrency) : 'Not supplied'}</dd></div>
+                  <div><dt>Bank-applied rate</dt><dd>{transaction.bankAppliedRate ?? 'Not supplied'}</dd></div>
+                  <div><dt>Reference rate</dt><dd>{transaction.marketRate ?? 'Pending'}{transaction.marketRateDate ? ` · ${shortDate(transaction.marketRateDate)}` : ''}</dd></div>
+                  <div><dt>Actual fee</dt><dd>{money(transaction.explicitFeeNative, transaction.nativeCurrency)}{transaction.explicitFeeBase != null ? ` · ${money(transaction.explicitFeeBase, fx.baseCurrency)} reporting` : ''}</dd></div>
+                  <div><dt>Estimated markup</dt><dd>{transaction.estimatedMarkupNative == null ? 'Not available' : money(transaction.estimatedMarkupNative, transaction.nativeCurrency)}{transaction.markupPercent != null ? ` · ${transaction.markupPercent}%` : ''}</dd></div>
+                </dl>
+              </article>
+            {/each}
+          </div>
+        {/if}
+      </article>
     </div>
   {/if}
 </div>
@@ -537,14 +579,13 @@
   .metric-card small { color: var(--muted); font-size: 0.62rem; line-height: 1.4; }
   .negative { color: var(--danger) !important; }
   .overview-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.65fr); gap: 1rem; align-items: start; }
+  .position-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr); gap: 1rem; }
   .side-stack { display: grid; gap: 1rem; }
   .summary-card dl, .series-facts { display: grid; gap: 0; margin: 0; }
   .summary-card dl > div, .series-facts > div { display: flex; min-height: 38px; padding: 0.45rem 0; align-items: center; justify-content: space-between; gap: 1rem; border-top: 1px solid #e5e7e1; }
   dt { color: var(--muted); font-size: 0.65rem; }
   dd { margin: 0; font-size: 0.68rem; font-weight: 800; text-align: right; }
   .full-button { width: 100%; margin-top: 1rem; }
-  .muted-copy { margin: 0; color: var(--muted); font-size: 0.72rem; }
-  .settings-row { display: grid; grid-template-columns: minmax(220px, 430px) auto; gap: 0.6rem; align-items: end; }
   .trends-heading { align-items: end; }
   .trend-details-grid { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 1rem; align-items: start; }
   .table-scroll { overflow-x: auto; }
@@ -589,21 +630,33 @@
   .finding-context strong { color: var(--ink); }
   .evidence { padding: 0 0.8rem 0.8rem; border: 1px solid #e1e3dc; border-radius: 11px; background: #f8f7f2; }
   .pagination { display: flex; align-items: center; justify-content: center; gap: 0.8rem; color: var(--muted); font-size: 0.68rem; }
+  .fx-list { display: grid; border-top: 1px solid var(--line); }
+  .fx-list > article { display: grid; gap: 0.75rem; padding: 0.9rem 0; border-bottom: 1px solid var(--line); }
+  .fx-list > article:last-child { border-bottom: 0; }
+  .fx-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+  .fx-heading > span { display: grid; gap: 0.2rem; }
+  .fx-heading small { color: var(--muted); font-size: 0.61rem; }
+  .fx-heading > strong { color: var(--forest); font-size: 0.76rem; white-space: nowrap; }
+  .fx-list dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; gap: 0.5rem; }
+  .fx-list dl div { display: grid; min-height: 58px; padding: 0.55rem; align-content: space-between; gap: 0.25rem; border: 1px solid #e1e3dc; border-radius: 9px; background: #f8f7f2; }
+  .fx-list dl dd { text-align: left; overflow-wrap: anywhere; }
   @media (max-width: 980px) {
     .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .overview-grid, .trend-details-grid { grid-template-columns: 1fr; }
+    .overview-grid, .trend-details-grid, .position-grid { grid-template-columns: 1fr; }
     .filter-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .filter-bar > div { grid-column: 1 / -1; }
     .recurring-grid { grid-template-columns: 1fr; }
+    .fx-list dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 700px) {
     .header-controls { width: 100%; align-items: stretch; flex-direction: column; }
-    .settings-row, .correction-form { grid-template-columns: 1fr; }
+    .correction-form { grid-template-columns: 1fr; }
     .seasonality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .filter-bar { grid-template-columns: 1fr; }
     .filter-bar > div { grid-column: auto; }
     .card-heading, .finding-heading { display: grid; }
     .finding-heading > small { white-space: normal; }
+    .fx-list dl { grid-template-columns: 1fr; }
   }
   @media (max-width: 480px) {
     .metric-grid { grid-template-columns: 1fr; }

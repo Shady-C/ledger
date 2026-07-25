@@ -1,5 +1,6 @@
 <script lang="ts">
   import { accountKind } from '$lib/format.js';
+  import type { MarketCode } from '@ledger/shared-types';
   import type { AccountView, InstitutionView } from './phase1-types.js';
 
   type AccountDraft = {
@@ -7,12 +8,14 @@
     displayName: string;
     kind: AccountView['kind'];
     nativeCurrency: string;
+    marketCode: MarketCode;
     accountRefMasked: string | null;
     creditLimit: string | null;
   };
 
   export let account: AccountView | null = null;
   export let institutions: InstitutionView[] = [];
+  export let defaultMarket: MarketCode | '' = '';
   export let onSubmit: (draft: AccountDraft) => Promise<void> = async () => undefined;
   export let onCancel: () => void = () => undefined;
 
@@ -20,19 +23,23 @@
   let institutionId = '';
   let kind: AccountView['kind'] = 'chequing';
   let nativeCurrency = 'CAD';
+  let marketCode: MarketCode | '' = '';
   let accountRefMasked = '';
   let creditLimit = '';
   let saving = false;
   let message = '';
   let initializedFor: string | null | undefined = undefined;
+  let initializationKey = '';
   const maskedReferencePattern = '[^0-9]+[0-9]{2,6}';
 
-  $: if (initializedFor !== (account?.id ?? null)) {
-    initializedFor = account?.id ?? null;
+  $: initializationKey = account?.id ?? `new-${defaultMarket}`;
+  $: if (initializedFor !== initializationKey) {
+    initializedFor = initializationKey;
     displayName = account?.displayName ?? '';
     institutionId = account?.institutionId ?? '';
     kind = account?.kind ?? 'chequing';
-    nativeCurrency = account?.nativeCurrency ?? 'CAD';
+    marketCode = account ? (account.marketCode ?? '') : defaultMarket;
+    nativeCurrency = account?.nativeCurrency ?? (marketCode === 'TZ' ? 'TZS' : 'CAD');
     accountRefMasked = account?.accountRefMasked ?? '';
     creditLimit = account?.creditLimit ?? '';
     message = '';
@@ -49,6 +56,10 @@
       message = 'Credit limit must be greater than zero.';
       return;
     }
+    if (!marketCode) {
+      message = 'Choose the account market.';
+      return;
+    }
     saving = true;
     try {
       await onSubmit({
@@ -56,6 +67,7 @@
         displayName: displayName.trim(),
         kind,
         nativeCurrency: nativeCurrency.trim().toUpperCase(),
+        marketCode,
         accountRefMasked: accountRefMasked.trim() || null,
         creditLimit: kind === 'credit_card' && creditLimit ? String(creditLimit) : null
       });
@@ -94,6 +106,15 @@
       {/each}
     </select>
     {#if locked}<small>Type is locked after the first imported record.</small>{/if}
+  </label>
+  <label class="field">
+    <span>Market</span>
+    <select bind:value={marketCode} required aria-label="Account market">
+      <option value="" disabled>Choose a market</option>
+      <option value="CA">Canada</option>
+      <option value="TZ">Tanzania</option>
+    </select>
+    <small>Controls country scopes, not the account currency.</small>
   </label>
   <label class="field">
     <span>Native currency</span>
