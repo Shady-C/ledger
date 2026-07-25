@@ -69,23 +69,24 @@ jobs:
 
       - name: Ruff
         working-directory: services/worker
-        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
+        run: uv run --frozen --extra dev python -m ruff check worker tests ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase3_smoke.py ../../scripts/ask_live_acceptance.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
 
       - name: Mypy
         working-directory: services/worker
-        run: uv run --frozen --extra dev python -m mypy worker ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
+        run: uv run --frozen --extra dev python -m mypy worker ../../scripts/phase0_smoke.py ../../scripts/phase1_smoke.py ../../scripts/phase2_smoke.py ../../scripts/phase3_smoke.py ../../scripts/ask_live_acceptance.py ../../scripts/phase2_db_acceptance.py ../../scripts/phase2_analytics_benchmark.py ../../scripts/im_bank_tz_pdf_acceptance.py
 
       - name: Test
         working-directory: services/worker
         run: uv run --frozen --extra dev python -m pytest
 
   database:
-    name: Phase 2 database
+    name: Phase 3 database
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       LEDGER_PHASE2_ACCEPTANCE_ADMIN_URL: "postgresql://ledger:ledger_test_password@127.0.0.1:5432/postgres?sslmode=disable"
       LEDGER_BENCHMARK_ADMIN_URL: "postgresql://ledger:ledger_test_password@127.0.0.1:5432/postgres?sslmode=disable"
+      LEDGER_ASK_POSTGRES_TEST_URL: "postgresql://ledger:ledger_test_password@127.0.0.1:5432/ledger?sslmode=disable"
     services:
       postgres:
         image: pgvector/pgvector:0.8.2-pg16-bookworm
@@ -103,6 +104,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -152,6 +165,9 @@ jobs:
             pgvector/pgvector:0.8.2-pg16-bookworm \
             psql --host 127.0.0.1 --username ledger --dbname ledger \
             --set ON_ERROR_STOP=1 --file /seeds/001_phase0.sql
+
+      - name: Run Ask PostgreSQL executor tests
+        run: make test-ask-postgres
 
       - name: Verify Phase 2 schema
         run: |
@@ -232,11 +248,11 @@ jobs:
       - name: Run Phase 2 migration acceptance
         run: make phase2-db-acceptance
 
-      - name: Run Phase 2 analytics benchmark
+      - name: Run Phase 3 analytics and Ask benchmark
         run: make benchmark-analytics
 
   containers:
-    name: Phase 2 container stack
+    name: Phase 3 container stack
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
@@ -259,8 +275,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: services/worker/uv.lock
 
-      - name: Start Phase 2 stack
-        run: WORKER_PROVIDER_MODE=stub docker compose up --build --detach
+      - name: Start Phase 3 stack
+        run: ASK_ENABLED=true ASK_PROVIDER_MODE=stub WORKER_PROVIDER_MODE=stub docker compose up --build --detach
 
       - name: Wait for healthy API
         run: |
@@ -268,15 +284,15 @@ jobs:
             --retry 30 --retry-all-errors --retry-delay 2 \
             http://127.0.0.1:3000/api/health
 
-      - name: Run Phase 2 smoke test
+      - name: Run Phase 3 smoke test
         run: make smoke
 
-      - name: Show Phase 2 service state on failure
+      - name: Show Phase 3 service state on failure
         if: failure()
         run: |
           docker compose ps --all
           docker compose logs --no-color --tail=200
 
-      - name: Stop Phase 2 stack
+      - name: Stop Phase 3 stack
         if: always()
         run: docker compose down --volumes --remove-orphans
