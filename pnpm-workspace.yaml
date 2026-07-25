@@ -7,3 +7,6 @@ savePrefix: ""
 
 allowBuilds:
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/sdk@0.115.0'

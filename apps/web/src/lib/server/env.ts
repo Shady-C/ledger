@@ -26,6 +26,46 @@ function boolean(name: string, fallback: boolean) {
   return fallback;
 }
 
+export type AskProviderMode = 'live' | 'stub';
+
+export function parseAskProviderMode(value: string | undefined): AskProviderMode {
+  const mode = value?.trim().toLowerCase() || 'live';
+  if (mode !== 'live' && mode !== 'stub') {
+    throw new ConfigurationError('ASK_PROVIDER_MODE', 'must be live or stub');
+  }
+  return mode;
+}
+
+export function askConfig() {
+  const enabled = boolean('ASK_ENABLED', false);
+  let providerMode: AskProviderMode = 'live';
+  let configurationValid = true;
+  try {
+    providerMode = parseAskProviderMode(process.env.ASK_PROVIDER_MODE);
+  } catch {
+    configurationValid = false;
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim() || '';
+  const available = enabled && configurationValid && (providerMode === 'stub' || apiKey.length > 0);
+  return {
+    enabled,
+    available,
+    reason: enabled
+      ? available
+        ? null
+        : configurationValid
+          ? 'missing_configuration'
+          : 'invalid_configuration'
+      : 'disabled',
+    configurationValid,
+    providerMode,
+    apiKey,
+    capableModel: process.env.ANTHROPIC_MODEL_CAPABLE?.trim() || 'claude-sonnet-5',
+    cheapModel: process.env.ANTHROPIC_MODEL_CHEAP?.trim() || 'claude-haiku-4-5-20251001',
+    timeoutMs: Math.min(integer('ASK_PROVIDER_TIMEOUT_MS', 20_000), 20_000)
+  } as const;
+}
+
 export function databaseConfig() {
   return {
     connectionString: required('DATABASE_URL'),
