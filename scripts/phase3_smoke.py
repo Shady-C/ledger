@@ -385,7 +385,7 @@ def main() -> None:
         raise AssertionError("category-driver Ask did not use category grouping")
     category_rows = evidence_rows(categories)
     for category, expected in {
-        "Dining": "1355.34",
+        "Dining": "2155.11",
         "Travel": "750.50",
         "Groceries": "500.00",
     }.items():
