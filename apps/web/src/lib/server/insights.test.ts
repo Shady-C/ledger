@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   insightFindingsQuerySchema,
   insightRecurringQuerySchema,
+  insightSeasonalityQuerySchema,
   insightTrendsQuerySchema
 } from '@ledger/shared-types';
 
@@ -15,7 +16,9 @@ import {
   buildSeasonalityQuery,
   buildSummaryQuery,
   buildTrendsQuery,
-  enqueueAnalyticsRefreshInTransaction
+  enqueueAnalyticsRefreshInTransaction,
+  readInsightRecurring,
+  readInsightSeasonality
 } from './insights.js';
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
@@ -27,7 +30,7 @@ const merchantId = 'bbd9154c-2607-42c3-9ae1-cf7ea414838b';
 describe('Insights SQL builders', () => {
   it('reads only the published aggregate generation and parameterizes entity filters', () => {
     const summary = buildSummaryQuery({ accountId }, range);
-    const seasonality = buildSeasonalityQuery({ categoryId }, range);
+    const seasonality = buildSeasonalityQuery({ categoryId }, range, '2026-07-25');
 
     expect(summary.text).toContain('analytics_monthly_current');
     expect(summary.text).toContain("$1::date - INTERVAL '1 year'");
@@ -38,15 +41,15 @@ describe('Insights SQL builders', () => {
     expect(seasonality.text).toContain("aggregate.dimension_type = 'category'");
     expect(seasonality.text).toContain("COALESCE(aggregate.spending_base, 0)");
     expect(seasonality.text).toContain("ledger.coverage_status = 'complete'");
-    expect(seasonality.text).toContain(
-      "ledger.period_start < date_trunc('month', CURRENT_DATE)::date"
-    );
+    expect(seasonality.text).toContain("ledger.period_start < date_trunc('month', $6::date)::date");
+    expect(seasonality.text).not.toContain('CURRENT_DATE');
     expect(seasonality.values).toEqual([
       '2026-01-01',
       '2026-12-01',
       'ALL',
       categoryId,
-      'ALL'
+      'ALL',
+      '2026-07-25'
     ]);
   });
 
@@ -66,11 +69,21 @@ describe('Insights SQL builders', () => {
 
   it('computes coverage from valued and pending native rows with parameterized dates', () => {
     const coverage = buildCoverageQuery({ merchantId }, range);
+    const watermark = '2026-07-25T08:30:00.000Z';
+    const pinnedCoverage = buildCoverageQuery({ merchantId }, range, watermark);
 
     expect(coverage.text).toContain('amount_base IS NULL');
     expect(coverage.text).toContain('SUM(amount_native)');
     expect(coverage.text).not.toContain(merchantId);
     expect(coverage.values).toEqual(['2026-01-01', '2026-12-31', merchantId]);
+    expect(pinnedCoverage.text).toContain('ledger_txn.updated_at <= $4::timestamptz');
+    expect(pinnedCoverage.text).not.toContain(watermark);
+    expect(pinnedCoverage.values).toEqual([
+      '2026-01-01',
+      '2026-12-31',
+      merchantId,
+      watermark
+    ]);
   });
 
   it('selects requested trend dimensions and calculates trailing robust summaries', () => {
@@ -94,12 +107,17 @@ describe('Insights SQL builders', () => {
       page: '2',
       pageSize: '10'
     });
-    const recurring = buildRecurringQueries(spec, range);
+    const recurring = buildRecurringQueries(spec, range, undefined, '2026-07-25');
 
     expect(recurring.data.text).not.toContain(accountId);
     expect(recurring.data.text).toContain('expected_amount_override');
     expect(recurring.data.text).toContain('series.last_detected_generation = (');
     expect(recurring.data.text).toContain('published.base_currency = ledger.base_currency');
+    expect(recurring.data.text).toContain(
+      'COALESCE(series.next_date_override, series.detected_next_date) < $9::date'
+    );
+    expect(recurring.data.text.match(/occurrence\.occurrence_date BETWEEN \$7::date AND \$8::date/g)).toHaveLength(2);
+    expect(recurring.data.text).not.toContain('CURRENT_DATE');
     expect(recurring.data.values).toEqual([
       '2026-01-01',
       '2026-12-31',
@@ -107,10 +125,13 @@ describe('Insights SQL builders', () => {
       accountId,
       'confirmed',
       'monthly',
+      '2026-01-01',
+      '2026-12-31',
+      '2026-07-25',
       10,
       10
     ]);
-    expect(recurring.count.values).toEqual(recurring.data.values.slice(0, -2));
+    expect(recurring.count.values).toEqual(recurring.data.values.slice(0, 6));
   });
 
   it('binds every finding filter and applies a stable severity/status ordering', () => {
@@ -215,6 +236,96 @@ function result<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
     rows
   };
 }
+
+describe('Insights request-local snapshot options', () => {
+  it('passes the request as-of date and published watermark through seasonality reads', async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    const client = {
+      async query(text: string, values: unknown[] = []) {
+        calls.push({ text, values });
+        if (text.includes('ledger.base_currency AS active_currency')) {
+          return result([{
+            active_currency: 'CAD',
+            published_currency: 'CAD',
+            threshold_policy_version: 'materiality-v1'
+          }]);
+        }
+        if (text.includes('WITH eligible_period AS')) return result([]);
+        if (text.includes('WITH selected AS')) {
+          return result([{
+            valued_transaction_count: 0,
+            unvalued_transaction_count: 0,
+            unvalued_by_currency: []
+          }]);
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }
+    } as unknown as PoolClient;
+    const watermark = '2026-07-25T08:30:00.000Z';
+    const spec = insightSeasonalityQuerySchema.parse({
+      range: 'all',
+      from: '2025-01-01',
+      to: '2026-07-25'
+    });
+
+    await readInsightSeasonality(spec, client, {
+      asOfDate: '2026-07-25',
+      sourceWatermark: watermark
+    });
+
+    const seasonality = calls.find((call) => call.text.includes('WITH eligible_period AS'));
+    const coverage = calls.find((call) => call.text.includes('WITH selected AS'));
+    expect(seasonality?.text).not.toContain('CURRENT_DATE');
+    expect(seasonality?.values).toContain('2026-07-25');
+    expect(coverage?.text).toContain('ledger_txn.updated_at <= $3::timestamptz');
+    expect(coverage?.text).not.toContain(watermark);
+    expect(coverage?.values).toEqual(['2025-01-01', '2026-07-25', watermark]);
+  });
+
+  it('passes the request as-of date through recurring overdue evaluation', async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    const client = {
+      async query(text: string, values: unknown[] = []) {
+        calls.push({ text, values });
+        if (text.includes('ledger.base_currency AS active_currency')) {
+          return result([{
+            active_currency: 'TZS',
+            published_currency: 'TZS',
+            threshold_policy_version: 'materiality-v1'
+          }]);
+        }
+        if (text.includes('series.id::text')) return result([]);
+        if (text.startsWith('SELECT COUNT(*)::int AS total')) return result([{ total: 0 }]);
+        throw new Error(`Unexpected query: ${text}`);
+      }
+    } as unknown as PoolClient;
+    const spec = insightRecurringQuerySchema.parse({
+      range: 'all',
+      from: '2025-01-01',
+      to: '2026-07-25',
+      pageSize: '20'
+    });
+
+    await readInsightRecurring(spec, client, { asOfDate: '2026-07-25' });
+
+    const recurring = calls.find((call) => call.text.includes('series.id::text'));
+    expect(recurring?.text).not.toContain('CURRENT_DATE');
+    expect(recurring?.text).toContain(
+      'COALESCE(series.next_date_override, series.detected_next_date) < $6::date'
+    );
+    expect(recurring?.text.match(/occurrence\.occurrence_date BETWEEN \$4::date AND \$5::date/g)).toHaveLength(2);
+    expect(recurring?.values).toEqual([
+      '2025-01-01',
+      '2026-07-25',
+      'ALL',
+      '2025-01-01',
+      '2026-07-25',
+      '2026-07-25',
+      20,
+      0
+    ]);
+  });
+});
 
 describe('analytics refresh enqueue', () => {
   it('coalesces when a concurrent producer wins the active-job insert race', async () => {

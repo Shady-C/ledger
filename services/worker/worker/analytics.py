@@ -355,6 +355,7 @@ class AnalyticsRunContext:
     mode: str
     sensitivity: Sensitivity
     source_watermark: datetime | None
+    fx_rate_watermark: datetime | None = None
     base_currency: str = "CAD"
     threshold_profile: AnalyticsThresholdProfile = CAD_THRESHOLD_PROFILE
 
@@ -1242,6 +1243,11 @@ class AnalyticsRefreshService:
                     if snapshot.context.source_watermark is not None
                     else None
                 ),
+                "fx_rate_watermark": (
+                    snapshot.context.fx_rate_watermark.isoformat()
+                    if snapshot.context.fx_rate_watermark is not None
+                    else None
+                ),
                 "aggregate_count": len(aggregates),
                 "recurring_series_count": len(recurring),
                 "finding_count": len(findings),
@@ -1661,12 +1667,20 @@ class PostgresAnalyticsRepository:
                 SELECT GREATEST(
                     (SELECT max(updated_at) FROM txn),
                     (SELECT max(updated_at) FROM statement),
-                    (SELECT max(updated_at) FROM account)
-                ) AS watermark
+                    (SELECT max(updated_at) FROM account),
+                    (SELECT max(updated_at) FROM category),
+                    (SELECT max(updated_at) FROM merchant)
+                ) AS watermark,
+                (SELECT max(fetched_at) FROM fx_rate) AS fx_rate_watermark
                 """
             )
             watermark_row = cursor.fetchone()
             watermark = watermark_row["watermark"] if watermark_row is not None else None
+            fx_rate_watermark = (
+                watermark_row["fx_rate_watermark"]
+                if watermark_row is not None
+                else None
+            )
             if run_id is None:
                 cursor.execute(
                     """
@@ -1765,6 +1779,11 @@ class PostgresAnalyticsRepository:
             mode=effective_mode,
             sensitivity=sensitivity,
             source_watermark=watermark if isinstance(watermark, datetime) else None,
+            fx_rate_watermark=(
+                fx_rate_watermark
+                if isinstance(fx_rate_watermark, datetime)
+                else None
+            ),
             base_currency=base_currency,
             threshold_profile=threshold_profile,
         )

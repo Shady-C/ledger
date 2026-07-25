@@ -200,6 +200,37 @@ describe('analytics query builders', () => {
     expect(built.text).toContain('as_of >= evidence.booked_date - 7');
   });
 
+  it('binds the Ask source watermark and result bound without changing FX arithmetic', () => {
+    const watermark = '2026-07-25T08:30:00.000Z';
+    const built = buildFxAnalyticsQuery(
+      analyticsQuerySchema.parse({ market: 'TZ' }),
+      undefined,
+      { sourceWatermark: watermark, limit: 21 }
+    );
+    expect(built.text).toContain('t.updated_at <= $2::timestamptz');
+    expect(built.text).toContain('LIMIT $3');
+    expect(built.text).toContain('COUNT(*)::int AS total_row_count');
+    expect(built.text).toContain('missing_rate_by_currency');
+    expect(built.text).not.toContain(watermark);
+    expect(built.values).toEqual(['TZ', watermark, 21]);
+  });
+
+  it('binds Ask-only FX entity filters and the generation rate cutoff', () => {
+    const categoryId = '550e8400-e29b-41d4-a716-446655440001';
+    const cutoff = '2026-07-25T08:00:00.000Z';
+    const built = buildFxAnalyticsQuery(
+      analyticsQuerySchema.parse({ market: 'CA' }),
+      undefined,
+      { categoryId, rateCutoff: cutoff, limit: 20 }
+    );
+    expect(built.text).toContain('t.category_id = $2::uuid');
+    expect(built.text).toContain('fetched_at <= $3::timestamptz');
+    expect(built.text).toContain('LIMIT $4');
+    expect(built.text).not.toContain(categoryId);
+    expect(built.text).not.toContain(cutoff);
+    expect(built.values).toEqual(['CA', categoryId, cutoff, 20]);
+  });
+
   it('classifies credit-card refunds as inflow and charges as outflow', () => {
     const built = buildCashflowQuery(analyticsQuerySchema.parse({}));
     const sql = built.text.replace(/\s+/g, ' ').trim();

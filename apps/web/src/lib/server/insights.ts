@@ -33,6 +33,13 @@ type EntityFilters = {
 };
 type ResolvedRange = { from: string; to: string };
 
+export type InsightReadOptions = {
+  /** Locally resolved calendar date used for current-period and overdue semantics. */
+  asOfDate?: string;
+  /** Published source boundary used when coverage reads live transaction rows. */
+  sourceWatermark?: string | null;
+};
+
 type CoverageRow = {
   valued_transaction_count: number;
   unvalued_transaction_count: number;
@@ -375,11 +382,20 @@ export async function resolveInsightRange(
   return { from: result.rows[0]?.from_date ?? to, to };
 }
 
-export function buildCoverageQuery(filters: EntityFilters, range: ResolvedRange): BuiltQuery {
+export function buildCoverageQuery(
+  filters: EntityFilters,
+  range: ResolvedRange,
+  sourceWatermark?: string | null
+): BuiltQuery {
   const values: unknown[] = [];
   const from = addValue(values, range.from, '::date');
   const to = addValue(values, range.to, '::date');
   const entityClauses = transactionEntityClauses(filters, values, 'ledger_txn');
+  if (sourceWatermark) {
+    entityClauses.push(
+      `ledger_txn.updated_at <= ${addValue(values, sourceWatermark, '::timestamptz')}`
+    );
+  }
   return {
     text: `
       WITH selected AS (
@@ -425,12 +441,13 @@ function parseJsonArray(value: unknown): unknown[] {
   return [];
 }
 
-async function readCoverage(
+export async function readInsightCoverage(
   filters: EntityFilters,
   range: ResolvedRange,
-  client?: PoolClient
+  client?: PoolClient,
+  sourceWatermark?: string | null
 ): Promise<InsightCoverage> {
-  const built = buildCoverageQuery(filters, range);
+  const built = buildCoverageQuery(filters, range, sourceWatermark);
   const result = await runQuery<CoverageRow>(client, built.text, built.values);
   const row = result.rows[0];
   const unvaluedByCurrency = parseJsonArray(row?.unvalued_by_currency).flatMap((value) => {
@@ -695,7 +712,7 @@ export async function readInsightSummary(
   const built = buildSummaryQuery(spec, range);
   const [summaryResult, coverage, recurring, findings, latestRun] = await Promise.all([
     runQuery<SummaryRow>(client, built.text, built.values),
-    readCoverage(spec, range, client),
+    readInsightCoverage(spec, range, client),
     readRecurringSummary(spec, range, context.baseCurrency, client),
     readFindingCounts(spec, range, client),
     readLatestRun(context.baseCurrency, client)
@@ -931,7 +948,7 @@ export async function readInsightTrends(
   const [result, moversResult, coverage] = await Promise.all([
     runQuery<TrendRow>(client, built.text, built.values),
     runQuery<MoverRow>(client, moversBuilt.text, moversBuilt.values),
-    readCoverage(spec, range, client)
+    readInsightCoverage(spec, range, client)
   ]);
   const movers = moversResult.rows.map((row) => ({
     dimensionType: row.dimension_type,
@@ -984,7 +1001,11 @@ export async function readInsightTrends(
   };
 }
 
-export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRange): BuiltQuery {
+export function buildSeasonalityQuery(
+  filters: EntityFilters,
+  range: ResolvedRange,
+  asOfDate = today()
+): BuiltQuery {
   const values: unknown[] = [];
   const from = addValue(values, monthStart(range.from), '::date');
   const to = addValue(values, monthStart(range.to), '::date');
@@ -993,6 +1014,7 @@ export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRan
   const liveAccountCompatibility = filters.accountId && filters.market
     ? `AND ${liveAccountMarketPredicate(addValue(values, filters.accountId), marketScope)}`
     : '';
+  const asOf = addValue(values, asOfDate, '::date');
   return {
     text: `
       WITH eligible_period AS (
@@ -1001,7 +1023,7 @@ export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRan
         WHERE ledger.dimension_type = 'ledger'
           AND ledger.market_scope = ${marketScope}
           AND ledger.coverage_status = 'complete'
-          AND ledger.period_start < date_trunc('month', CURRENT_DATE)::date
+          AND ledger.period_start < date_trunc('month', ${asOf})::date
           AND ledger.period_start BETWEEN ${from} AND ${to}
           ${liveAccountCompatibility}
       )
@@ -1027,16 +1049,19 @@ export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRan
 
 export async function readInsightSeasonality(
   spec: InsightSeasonalityQuery,
-  client?: PoolClient
+  client?: PoolClient,
+  options: InsightReadOptions = {}
 ): Promise<InsightSeasonalityResponse> {
-  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightSeasonality(spec, snapshot));
+  if (!client) {
+    return withAnalyticsSnapshot((snapshot) => readInsightSeasonality(spec, snapshot, options));
+  }
   const context = await readAnalyticsContext(client);
   const range = await resolveInsightRange(spec, client);
-  const built = buildSeasonalityQuery(spec, range);
-  const [result, coverage] = await Promise.all([
-    runQuery<SeasonalityRow>(client, built.text, built.values),
-    readCoverage(spec, range, client)
-  ]);
+  const built = buildSeasonalityQuery(spec, range, options.asOfDate);
+  // A PoolClient owns one PostgreSQL connection. Keep snapshot queries
+  // sequential so cancellation and transaction ordering remain unambiguous.
+  const result = await runQuery<SeasonalityRow>(client, built.text, built.values);
+  const coverage = await readInsightCoverage(spec, range, client, options.sourceWatermark);
   const historyMonths = result.rows.reduce((total, row) => total + Number(row.observation_count), 0);
   const formatter = new Intl.DateTimeFormat('en', { month: 'short', timeZone: 'UTC' });
   return {
@@ -1070,7 +1095,8 @@ function recurringWhere(spec: InsightRecurringQuery, range: ResolvedRange, value
 export function buildRecurringQueries(
   spec: InsightRecurringQuery,
   range: ResolvedRange,
-  seriesId?: string
+  seriesId?: string,
+  asOfDate = today()
 ) {
   const values: unknown[] = [];
   const clauses: string[] = [];
@@ -1081,6 +1107,13 @@ export function buildRecurringQueries(
     text: `SELECT COUNT(*)::int AS total FROM recurring_series series WHERE ${where}`,
     values: [...values]
   };
+  // A series qualifies through an occurrence in the selected range. Keep the
+  // evidence projected for that series on the same range as well: otherwise a
+  // narrow Ask/Insights filter can expose all-history occurrence counts and
+  // price changes under a range-specific heading.
+  const occurrenceFrom = addValue(values, range.from, '::date');
+  const occurrenceTo = addValue(values, range.to, '::date');
+  const asOf = addValue(values, asOfDate, '::date');
   const limit = addValue(values, spec.pageSize);
   const offset = addValue(values, (spec.page - 1) * spec.pageSize);
   const data: BuiltQuery = {
@@ -1099,12 +1132,12 @@ export function buildRecurringQueries(
         COALESCE(series.expected_amount_override, series.detected_expected_amount)::text AS expected_amount,
         series.comparison_currency,
         occurrence_context.occurrence_count,
-        series.first_occurrence_date::text,
-        series.latest_occurrence_date::text,
+        occurrence_context.first_occurrence_date,
+        occurrence_context.latest_occurrence_date,
         COALESCE(series.next_date_override, series.detected_next_date)::text AS expected_next_date,
         (
           series.status IN ('detected', 'confirmed')
-          AND COALESCE(series.next_date_override, series.detected_next_date) < CURRENT_DATE
+          AND COALESCE(series.next_date_override, series.detected_next_date) < ${asOf}
         ) AS overdue,
         occurrence_context.latest_change_percent,
         (
@@ -1127,6 +1160,7 @@ export function buildRecurringQueries(
         JOIN txn ledger_txn ON ledger_txn.id = occurrence.transaction_id
         JOIN account ON account.id = ledger_txn.account_id
         WHERE occurrence.series_id = series.id
+          AND occurrence.occurrence_date BETWEEN ${occurrenceFrom} AND ${occurrenceTo}
       ) account_context ON true
       LEFT JOIN LATERAL (
         WITH ranked AS (
@@ -1135,9 +1169,12 @@ export function buildRecurringQueries(
             ROW_NUMBER() OVER (ORDER BY occurrence.occurrence_date DESC, occurrence.occurrence_number DESC) AS recent_rank
           FROM recurring_occurrence occurrence
           WHERE occurrence.series_id = series.id
+            AND occurrence.occurrence_date BETWEEN ${occurrenceFrom} AND ${occurrenceTo}
         )
         SELECT
           COUNT(*)::int AS occurrence_count,
+          MIN(occurrence_date)::text AS first_occurrence_date,
+          MAX(occurrence_date)::text AS latest_occurrence_date,
           CASE WHEN MAX(comparison_amount) FILTER (WHERE recent_rank = 2) <> 0
             THEN ROUND(
               (MAX(comparison_amount) FILTER (WHERE recent_rank = 1)
@@ -1206,16 +1243,17 @@ function mapRecurring(row: RecurringRow): RecurringSeries {
 
 export async function readInsightRecurring(
   spec: InsightRecurringQuery,
-  client?: PoolClient
+  client?: PoolClient,
+  options: InsightReadOptions = {}
 ): Promise<InsightRecurringResponse> {
-  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightRecurring(spec, snapshot));
+  if (!client) {
+    return withAnalyticsSnapshot((snapshot) => readInsightRecurring(spec, snapshot, options));
+  }
   const context = await readAnalyticsContext(client);
   const range = await resolveInsightRange(spec, client);
-  const built = buildRecurringQueries(spec, range);
-  const [data, count] = await Promise.all([
-    runQuery<RecurringRow>(client, built.data.text, built.data.values),
-    runQuery<{ total: number }>(client, built.count.text, built.count.values)
-  ]);
+  const built = buildRecurringQueries(spec, range, undefined, options.asOfDate);
+  const data = await runQuery<RecurringRow>(client, built.data.text, built.data.values);
+  const count = await runQuery<{ total: number }>(client, built.count.text, built.count.values);
   const total = Number(count.rows[0]?.total ?? 0);
   return {
     baseCurrency: context.baseCurrency,
@@ -1411,10 +1449,8 @@ export async function readInsightFindings(
   const context = await readAnalyticsContext(client);
   const range = await resolveInsightRange(spec, client);
   const built = buildFindingQueries(spec, range);
-  const [data, count] = await Promise.all([
-    runQuery<FindingRow>(client, built.data.text, built.data.values),
-    runQuery<{ total: number }>(client, built.count.text, built.count.values)
-  ]);
+  const data = await runQuery<FindingRow>(client, built.data.text, built.data.values);
+  const count = await runQuery<{ total: number }>(client, built.count.text, built.count.values);
   const total = Number(count.rows[0]?.total ?? 0);
   return {
     baseCurrency: context.baseCurrency,

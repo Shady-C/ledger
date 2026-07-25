@@ -858,10 +858,32 @@ export function buildNetWorthQuery(spec: Pick<AnalyticsQuery, 'accountId' | 'mar
   };
 }
 
-export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: string): BuiltQuery {
+export function buildFxAnalyticsQuery(
+  spec: AnalyticsQuery,
+  transactionId?: string,
+  options: {
+    sourceWatermark?: string;
+    rateCutoff?: string;
+    categoryId?: string;
+    merchantId?: string;
+    limit?: number;
+  } = {}
+): BuiltQuery {
   const values: unknown[] = [];
   const conditions = buildAnalyticsConditions(spec, values);
   if (transactionId) conditions.push(`t.id = ${addValue(values, transactionId)}::uuid`);
+  if (options.categoryId) {
+    conditions.push(`t.category_id = ${addValue(values, options.categoryId)}::uuid`);
+  }
+  if (options.merchantId) {
+    conditions.push(`t.merchant_id = ${addValue(values, options.merchantId)}::uuid`);
+  }
+  if (options.sourceWatermark) {
+    conditions.push(`t.updated_at <= ${addValue(values, options.sourceWatermark)}::timestamptz`);
+  }
+  const rateCutoff = options.rateCutoff
+    ? addValue(values, options.rateCutoff)
+    : undefined;
   conditions.push(`(
     (t.original_amount IS NOT NULL AND t.original_currency IS NOT NULL)
     OR t.fx_fee_amount_native IS NOT NULL
@@ -869,6 +891,9 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: stri
     OR t.amount_base IS NULL
   )`);
   const where = `WHERE ${conditions.join(' AND ')}`;
+  const limit = options.limit === undefined
+    ? ''
+    : `LIMIT ${addValue(values, Math.max(1, Math.trunc(options.limit)))}`;
   return {
     text: `
       WITH setting AS (
@@ -919,6 +944,7 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: stri
             AND quote = evidence.native_currency
             AND as_of <= evidence.booked_date
             AND as_of >= evidence.booked_date - ${FX_MAX_STALENESS_DAYS}
+            ${rateCutoff ? `AND fetched_at <= ${rateCutoff}::timestamptz` : ''}
           ORDER BY as_of DESC
           LIMIT 1
         ) market ON evidence.foreign_currency IS NOT NULL
@@ -963,6 +989,33 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: stri
             )
           ) AS missing_rate
         FROM calculated
+      ), coverage AS (
+        SELECT
+          COALESCE(
+            SUM(explicit_fee_base) FILTER (WHERE explicit_fee_base IS NOT NULL),
+            0
+          )::text AS total_explicit_fee_base,
+          COALESCE(
+            SUM(estimated_markup_base) FILTER (WHERE estimated_markup_base IS NOT NULL),
+            0
+          )::text AS total_estimated_markup_base,
+          COALESCE(
+            SUM(COALESCE(explicit_fee_base, 0) + COALESCE(estimated_markup_base, 0)),
+            0
+          )::text AS total_fx_cost_base,
+          COUNT(*) FILTER (WHERE missing_rate)::int AS missing_rate_count,
+          COUNT(*)::int AS total_row_count,
+          COALESCE((
+            SELECT jsonb_object_agg(currency, transaction_count)
+            FROM (
+              SELECT COALESCE(foreign_currency, native_currency) AS currency,
+                COUNT(*)::int AS transaction_count
+              FROM valued
+              WHERE missing_rate
+              GROUP BY COALESCE(foreign_currency, native_currency)
+            ) pending
+          ), '{}'::jsonb) AS missing_rate_by_currency
+        FROM valued
       )
       SELECT
         transaction_id,
@@ -992,23 +1045,17 @@ export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: stri
         estimated_markup_native::text,
         estimated_markup_base::text,
         is_fx_fee,
+        missing_rate,
         base_currency,
-        COALESCE(
-          SUM(explicit_fee_base) FILTER (WHERE explicit_fee_base IS NOT NULL) OVER (),
-          0
-        )::text AS total_explicit_fee_base,
-        COALESCE(
-          SUM(estimated_markup_base)
-            FILTER (WHERE estimated_markup_base IS NOT NULL) OVER (),
-          0
-        )::text AS total_estimated_markup_base,
-        COALESCE(
-          SUM(COALESCE(explicit_fee_base, 0) + COALESCE(estimated_markup_base, 0)) OVER (),
-          0
-        )::text AS total_fx_cost_base,
-        (COUNT(*) FILTER (WHERE missing_rate) OVER ())::int AS missing_rate_count
-      FROM valued
-      ORDER BY booked_date DESC, transaction_id DESC`,
+        coverage.total_explicit_fee_base,
+        coverage.total_estimated_markup_base,
+        coverage.total_fx_cost_base,
+        coverage.missing_rate_count,
+        coverage.total_row_count,
+        coverage.missing_rate_by_currency
+      FROM valued CROSS JOIN coverage
+      ORDER BY booked_date DESC, transaction_id DESC
+      ${limit}`,
     values
   };
 }

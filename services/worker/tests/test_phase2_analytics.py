@@ -160,6 +160,7 @@ def _finding_suite_snapshot() -> AnalyticsSnapshot:
             mode="full",
             sensitivity=Sensitivity.BALANCED,
             source_watermark=datetime(2026, 7, 31, 12, tzinfo=UTC),
+            fx_rate_watermark=datetime(2026, 7, 31, 11, 30, tzinfo=UTC),
         ),
         transactions=tuple([*amount_rows, *recurring_rows, pending]),
         source_findings=source_findings,
@@ -876,6 +877,7 @@ def test_analytics_refresh_service_materializes_and_publishes_only_at_completion
     assert result == repository.published[-1]
     assert result["generation"] == 7
     assert result["source_watermark"] == "2026-07-31T12:00:00+00:00"
+    assert result["fx_rate_watermark"] == "2026-07-31T11:30:00+00:00"
     assert result["aggregate_count"] == len(repository.published[1])
     assert result["recurring_series_count"] == len(repository.published[2])
     assert result["finding_count"] == len(repository.published[3])
