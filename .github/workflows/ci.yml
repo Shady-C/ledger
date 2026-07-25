@@ -20,13 +20,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -49,10 +49,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -103,13 +103,13 @@ jobs:
           --health-retries 12
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -118,7 +118,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -169,7 +169,7 @@ jobs:
       - name: Run Ask PostgreSQL executor tests
         run: make test-ask-postgres
 
-      - name: Verify Phase 2 schema
+      - name: Verify Phase 2/2.1 schema
         run: |
           table_count="$(docker run --rm --network host \
             --env PGPASSWORD=ledger_test_password \
@@ -228,22 +228,23 @@ jobs:
             --command "select count(*) from pg_trigger where tgname = 'category_referenced_kind_immutable' and not tgisinternal;")"
           test "$category_kind_trigger_count" = "1"
 
-          phase2_shape="$(docker run --rm --network host \
+          phase2_1_shape="$(docker run --rm --network host \
             --env PGPASSWORD=ledger_test_password \
             pgvector/pgvector:0.8.2-pg16-bookworm \
             psql --host 127.0.0.1 --username ledger --dbname ledger \
             --set ON_ERROR_STOP=1 --tuples-only --no-align \
             --command "select concat_ws('|',
-              (select count(*) from schema_migrations where version in ('202607240012','202607240013')),
+              (select count(*) from schema_migrations where version in ('202607240012','202607240013','202607240014','202607240015')),
               (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'txn' and column_name in ('original_amount','original_currency','fx_fee_amount_native','is_fx_fee')),
               (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'txn' and column_name in ('amount_base','fx_rate','fx_rate_date') and is_nullable = 'YES'),
-              (select count(*) from pg_constraint where conname in ('ledger_settings_phase2_cad_only','txn_phase2_cad_base','analytics_monthly_currency_fixed')),
+              (select count(*) from pg_constraint where conname in ('ledger_settings_base_currency_supported','txn_reporting_currency_supported','analytics_monthly_currency_supported')),
               (select count(*) from pg_trigger where tgname in ('statement_account_currency_matches','transaction_account_currency_matches') and not tgisinternal),
-              (select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('analytics_run','analytics_settings','analytics_monthly_aggregate','recurring_series','recurring_occurrence','insight_finding')),
+              (select count(*) from information_schema.tables where table_schema = 'public' and table_name in ('analytics_run','analytics_settings','analytics_monthly_aggregate','recurring_series','recurring_occurrence','insight_finding','analytics_threshold_profile','home_currency_switch_audit')),
               (select count(*) from information_schema.views where table_schema = 'public' and table_name = 'analytics_monthly_current'),
-              (select count(*) from pg_constraint where conname = 'job_kind_valid' and position('analytics_refresh' in pg_get_constraintdef(oid)) > 0)
+              (select count(*) from pg_constraint where conname = 'job_kind_valid' and position('analytics_refresh' in pg_get_constraintdef(oid)) > 0),
+              (select count(*) from information_schema.columns where table_schema = 'public' and (table_name, column_name) in (('account','market_code'),('ledger_settings','market_profile')))
             );")"
-          test "$phase2_shape" = "2|4|3|3|2|6|1|1"
+          test "$phase2_1_shape" = "4|4|3|3|2|8|1|1|2"
 
       - name: Run Phase 2 migration acceptance
         run: make phase2-db-acceptance
@@ -261,10 +262,10 @@ jobs:
       - database
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
