@@ -97,38 +97,107 @@ and disposable fresh-stack smoke gates passed. All checked-in
 protocol/failure fixtures and provider responses were synthetic. No sanitized
 institution-specific TZS/USD export was supplied or accepted during Phase 1.
 
-## Phase 2 Process
+## Phase 2 Retrospective — Three-Layer Money and Deep Insights
 
-The active sequenced backlog, exact behavioral criteria, performance targets,
-and review state live in
-[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). Phase 2 is `in_review` after the
+**Completed:** 2026-07-25
+
+The completed backlog, exact behavioral criteria, and closure evidence live in
+[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). Phase 2 was approved after the
 ADR-0007 market-scoped UX remediation passed its expanded gates. ADR-0008's
-CAD/TZS home-currency implementation is present and verified, but Phase 2.1
-remains a separate, unapproved gate and does not become approved with Phase 2.
+home-currency work remained a separate Phase 2.1 approval and was approved
+independently on 2026-07-25.
 
-The final automated checkpoint passes `make check`, with zero Svelte errors or
-warnings plus Ruff and strict mypy, and `make test`, with 23 shared-contract, 63
-web-server, 7 component, 20 Playwright, and 196 worker tests plus 1 intentional
-worker skip. The production web build also passes. Disposable PostgreSQL
-acceptance applies all 15 migrations (`001`–`015`) and covers the Phase 1
-upgrade, market assignment/profile behavior, scoped analytics identity,
-currency-fenced publication, the immutable home-currency switch audit, and safe
-rollback behavior.
+### Delivered
 
-The disposable 100,000-transaction production analytics rebuild completes in
-`16.385s` against the `120s` limit; its slowest warmed materialized read is
-`1.721ms` against the `1000ms` limit. A uniquely named clean Compose stack also
-rebuilt the current images, applied all migrations plus the idempotent seed, and
-passed the active smoke contract, including the `2855.59` closing balance,
-zero-row repeat ingestion, All/Canada/Tanzania scopes, and CAD/TZS
-home-currency maintenance. Its disposable project and volumes were removed
-without touching the default user stack.
+- Explicit original, posted/native, and nullable reporting money with deferred
+  FX valuation, exact reconciliation, and single-currency accounts/statements.
+- Deterministic market-scoped monthly analytics, seasonality, recurring series,
+  explainable findings, durable review state, and atomic publication.
+- All/Canada/Tanzania scope identity, progressive conversion evidence, focused
+  Home and Activity experiences, Insights FX, Settings Advanced, and `/more`.
+- Deterministic CSV/XLSX ingestion and the accepted `im_bank_tz_pdf_v1` adapter
+  for all 11 supplied sanitized I&M Tanzania TZS image-PDF statements.
+- Separately approved Phase 2.1 CAD/TZS home reporting rebuilt from immutable
+  native money, with frozen materiality profiles, switch auditing, maintenance
+  state, and currency-fenced analytics generations.
 
-The real-bank checkpoint parses all 11 supplied sanitized I&M Tanzania TZS
-image-PDF statements through `im_bank_tz_pdf_v1`: all reconcile exactly, with
-41 transactions, five valid zero-activity statements, and zero additions when
-the largest 17-row statement is repeated. Its local OCR values are independently
-checked against running balances, printed totals, and closing balances. ADR-0006
-defers a named USD institution adapter; generic USD behavior remains covered by
-the deterministic synthetic suite. No Phase 2 retrospective or closure section
-should be written until review is approved.
+### What Went Well
+
+- The three monetary layers made native ledger acceptance independent from
+  reporting-rate availability while preserving exact posted truth.
+- Atomic, generation-bound analytics made deep Insights reproducible and kept
+  recurring corrections and finding review state durable.
+- Review feedback became explicit ADR-0007 scope and information-hierarchy
+  requirements with regression coverage rather than an untracked UI patch.
+- Real-bank acceptance combined bounded local OCR with balance deltas, printed
+  totals, closing balances, and repeat-ingestion checks.
+- Phase 2.1 stayed a separately approved gate, making its reporting-currency
+  risks and rollback constraints visible.
+
+### What Could Improve
+
+- Market scope and information hierarchy should have been defined before the
+  first Phase 2 review instead of added as remediation.
+- The original fixed-CAD choice reduced initial complexity but required a
+  follow-up phase and a partial supersession ADR once stable TZS reporting was
+  required.
+- The Phase 2 plan accumulated implementation checkpoints and approval notes;
+  future phases should keep one concise current-state section and preserve
+  detailed results in closure evidence.
+- A named USD institution adapter still depends on receiving a sanitized real
+  sample; generic USD behavior is covered but does not prove one bank layout.
+
+### Decisions and Carry-Forward
+
+- ADR-0005 through ADR-0008 remain the Phase 2/2.1 decisions. ADR-0008
+  supersedes only the fixed-CAD/public-switching clauses identified in the
+  earlier ADRs.
+- The `2855.59` reconciliation, zero-row repeat ingestion, native-truth
+  immutability, pending-FX behavior, All/CA/TZ isolation, CAD/TZS rebuild fence,
+  analytics generation identity, and review-state durability remain permanent
+  regression gates.
+- ADR-0006 continues to defer a named USD statement adapter until a sanitized
+  sample is supplied and explicitly scheduled.
+- Forecasting, irregular-PDF AI extraction, authentication, multi-tenancy,
+  investments, and budgets remain deferred.
+
+### Closure Evidence — 2026-07-25
+
+The permanent Phase 0–2.1 regression gates were rerun before approval and the
+recorded Phase 2 review evidence was accepted. The final recorded automated
+checkpoint passed `make check` with zero Svelte errors or warnings plus Ruff
+and strict mypy, `make test` with 23 shared-contract, 63 web-server, 7
+component, 20 Playwright, and 196 worker tests plus 1 intentional worker skip,
+and the production web build.
+
+Disposable PostgreSQL acceptance applied migrations `001`–`015`, preserved
+native truth and review state across the Phase 1 upgrade, proved market scope,
+CAD→TZS→CAD switching, immutable switch auditing, currency-fenced publication,
+rollback/reapplication, and refusal to roll back while TZS was active. The
+100,000-transaction rebuild completed in `16.385s` against `120s`; the slowest
+warm materialized read was `1.721ms` against `1000ms`.
+
+A uniquely named clean Compose stack preserved the `2855.59` closing balance
+and zero-row repeat import while covering All/Canada/Tanzania scopes, both
+three-layer currency directions, CAD/TZS maintenance, FX evidence, analytics,
+and durable finding review. All 11 supplied I&M Tanzania TZS statements
+reconciled exactly, covering 41 transactions and five zero-activity statements;
+the largest 17-row statement added zero rows on repeat. Disposable resources
+were removed without touching the default user stack.
+
+## Phase 3 Process — Grounded Ask
+
+Phase 3 is `in_progress`. Its active sequenced backlog, contracts, privacy
+boundary, performance targets, and release gates live in
+[PHASE-3-BUILD-PLAN.md](PHASE-3-BUILD-PLAN.md). ADR-0009 replaces the earlier
+iterative-agent sketch with one bounded planning call, a closed deterministic
+executor, and at most one opaque-reference narration call. ADR-0010 makes
+mutable-source freshness fail closed, keeps database-derived clarification
+choices local, and adds code-owned prohibited-intent enforcement.
+
+Phase 3 cannot move to `in_review` until the permanent earlier-phase gates,
+strict Ask contract/database/privacy suites, component and browser coverage,
+100,000-transaction Ask benchmark, disposable stub-provider smoke, and the
+one-time opt-in live Anthropic acceptance run all pass. Jira and Confluence are
+not configured, so the local plan remains the backlog and `docs/` remains the
+only source of truth.

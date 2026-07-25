@@ -1,46 +1,54 @@
-# Ledger Phase 2 — Codebase Handoff
+# Ledger Phase 3 — Codebase Handoff
 
-**Snapshot:** 2026-07-24
+**Snapshot:** 2026-07-25
 
-**Current phase:** Phase 2
+**Current phase:** Phase 3
 
-**Phase status:** `in_review`
+**Phase status:** `in_progress`
 
-This handoff starts from the completed Phase 1 implementation and describes the
-current Phase 2 working tree. The three-layer schema/worker paths, generic
-CSV/XLSX ingestion, analytics materialization, public contracts, Insights APIs,
-and UI are implemented. ADR-0007 market-scoped UX remediation and the
-separately gated ADR-0008 CAD/TZS home-currency implementation are present and
-the expanded gates pass. Phase 2.1 approval remains separate from Phase 2.
+This handoff starts from completed Phase 2 and the separately approved Phase
+2.1 follow-up. Their three-layer ledger, market-scoped analytics, deep Insights,
+and CAD/TZS home reporting are the permanent baseline. Phase 3 is building a
+bounded read-only Ask workflow in SvelteKit under ADR-0009. It remains
+`in_progress`; ADR-0010 adds fail-closed freshness and local-only clarification.
+The phase cannot enter review until all deterministic gates and the one-time
+live Anthropic acceptance run pass.
 
 ## Read These First
 
 1. [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) — active scope and phase metadata.
-2. [PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md) — Phase 2 backlog,
-   acceptance gates, and review state.
-3. [PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) — completed Phase 1 record.
-4. [BUILD-PLAN.md](BUILD-PLAN.md) — completed Phase 0 baseline and golden
+2. [PHASE-3-BUILD-PLAN.md](PHASE-3-BUILD-PLAN.md) — active Phase 3 backlog,
+   contracts, privacy boundary, and release gates.
+3. [PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md) — completed Phase 2/2.1
+   record and permanent acceptance gates.
+4. [PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) — completed Phase 1 record.
+5. [BUILD-PLAN.md](BUILD-PLAN.md) — completed Phase 0 baseline and golden
    reconciliation contract.
-5. [ARCHITECTURE.md](ARCHITECTURE.md) — current design plus explicitly labeled
+6. [ARCHITECTURE.md](ARCHITECTURE.md) — current design plus explicitly labeled
    later-phase design.
-6. [ADR-0001](decisions/0001-application-layer-statement-encryption.md),
+7. [ADR-0001](decisions/0001-application-layer-statement-encryption.md),
    [ADR-0002](decisions/0002-accept-equivalent-amex-description-columns.md),
    [ADR-0003](decisions/0003-ai-categorization-proposals.md),
    [ADR-0004](decisions/0004-account-positions-and-net-worth.md),
    [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md),
    [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md),
    [ADR-0007](decisions/0007-market-scopes-and-progressive-disclosure.md),
-   and [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md).
-7. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
+   [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md),
+   [ADR-0009](decisions/0009-bounded-tokenized-grounded-ask.md), and
+   [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md).
+8. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
 
 `docs/` is canonical. Jira and Confluence are not configured for this project;
-the local Phase 2 build plan is the active backlog.
+the local Phase 3 build plan is the active backlog.
 
 ## System at a Glance
 
 ```mermaid
 flowchart LR
     Browser["Market-scoped SvelteKit PWA"] --> Web["SvelteKit API/BFF"]
+    Web --> Ask["Bounded Grounded Ask"]
+    Ask -->|"read-only parameterized queries"| PG
+    Ask -->|"plan + opaque references"| AskAI["Anthropic or Ask fixture"]
     Web --> PG[("PostgreSQL 16 + pgvector")]
     Web --> MinIO[("MinIO encrypted objects")]
     Web -->|"enqueue"| Jobs["PostgreSQL job queue"]
@@ -52,12 +60,15 @@ flowchart LR
 ```
 
 The SvelteKit process owns UI rendering, validation, HTTP contracts, encrypted
-uploads, parameterized ledger/Insights reads, review writes, and job creation.
+uploads, parameterized ledger/Insights reads, the synchronous Phase 3 Ask
+workflow, review writes, and job creation.
+
 The Python worker owns parsing, normalization, FX stamping, deterministic
 categorization, reconciliation, provider-backed categorization and column
 mapping, recovery base rebuilds, and atomic analytics publication. PostgreSQL
 is authoritative for ledger data, settings, cached rates, learned mappings,
-review proposals, analytics snapshots/review state, and job state.
+review proposals, analytics snapshots/review state, and job state. Ask plans,
+evidence, answers, and conversation context are not persisted.
 
 ## Repository Map
 
@@ -71,8 +82,10 @@ review proposals, analytics snapshots/review state, and job state.
 | `db/seeds/` | Idempotent taxonomy and local development account seed |
 | `scripts/phase0_smoke.py` | Golden Phase 0 `2855.59` and repeat-import flow |
 | `scripts/phase1_smoke.py` | Historical Phase 1 synthetic flow and shared smoke helpers |
-| `scripts/phase2_smoke.py` | Active synthetic three-layer money, FX, scoped analytics, and Insights smoke |
-| `scripts/phase2_analytics_benchmark.py` | Disposable 100k full-refresh and warm materialized-read performance gate |
+| `scripts/phase2_smoke.py` | Historical synthetic three-layer money, FX, scoped analytics, and Insights smoke helpers |
+| `scripts/phase2_analytics_benchmark.py` | Disposable 100k full-refresh, warm Insights/Ask-query, and three-query-plan performance gate |
+| `scripts/phase3_smoke.py` | Active fresh-stack stub Ask flow plus permanent Phase 0–2.1 regression gates |
+| `scripts/ask_live_acceptance.py` | Opt-in privacy-safe live Anthropic canonical/adversarial release gate |
 | `docs/` | Source-of-truth scope, architecture, decisions, plans, and handoff |
 
 Generated builds, dependency stores, caches, local environments, raw financial
@@ -110,6 +123,14 @@ curl --fail --silent --show-error http://127.0.0.1:3000/api/health
 imports still work, unknown CSV/XLSX files settle as `needs_ai`, and existing
 categorization proposals remain reviewable; new categorization jobs cannot run.
 
+Ask has an independent web-process gate. `ASK_ENABLED=false` keeps it disabled
+even when worker AI is configured. `ASK_PROVIDER_MODE=live` is the configured
+default and reuses the existing Anthropic API key and capable/cheap model
+settings; `ASK_PROVIDER_MODE=stub` uses deterministic planning/narration
+fixtures. `ASK_PROVIDER_TIMEOUT_MS=20000` bounds each provider call. A missing
+key or unusable live provider makes only Ask unavailable. `GET /api/ask/status`
+reports that state without exposing secrets or model identifiers.
+
 The singleton `ledger_settings` row stores independent `market_profile` and
 `base_currency` values. Market profile supplies defaults only. Home currency is
 stable CAD or TZS and changes only through the confirmed Advanced maintenance
@@ -128,7 +149,7 @@ routes are:
 | `/accounts` | Scoped asset/card sections, market assignment, account/institution editing, and card limits/utilization |
 | `/categories` | Taxonomy editing/archive, unresolved work, proposal review, and categorization retry |
 | `/imports` | Account-targeted upload, job polling, history, reconciliation, failure, and `needs_ai` states |
-| `/insights` | Overview, Trends, Recurring, Findings, and FX tabs with scoped filters and review/correction actions |
+| `/insights` | Ask first/default, then Overview, Trends, Recurring, Findings, and FX, with scoped filters, grounded evidence, and review/correction actions |
 | `/settings` | General market profile plus Advanced health, readiness, sensitivity, rebuild, and confirmed CAD/TZS maintenance |
 | `/more` | Mobile hub for Accounts, Categories, Imports, and Settings |
 
@@ -150,7 +171,8 @@ reduced-motion behavior, and installable-PWA behavior.
 Direct navigation to all other pages is network-only. Net-worth responses
 are never service-worker cached. The worker also does not cache transaction
 pages, account lists, FX analytics, jobs or job details, uploads or other
-writes, category/proposal data, or import history. API handlers also emit
+writes, category/proposal data, import history, or Ask status/results. API
+handlers also emit
 `Cache-Control: no-store` read headers. Treat browser Cache Storage as private financial
 data when testing or handing a device to someone else.
 
@@ -198,6 +220,8 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `GET /api/insights/settings` | Analytics sensitivity and update time |
 | `PATCH /api/insights/settings` | Change sensitivity and queue a deduplicated full refresh |
 | `POST /api/insights/rebuild` | Queue an incremental or full analytics refresh |
+| `GET /api/ask/status` | Report independent Ask enablement/availability without secrets or model identifiers |
+| `POST /api/ask` | Validate one bounded question/context request and return grounded evidence, clarification, unsupported, or no-data |
 
 The implemented Phase 2 Insights contract exposes summary, trends, seasonality,
 recurring, findings, settings, and rebuild endpoints under `/api/insights`,
@@ -206,6 +230,18 @@ The exact route list and filters are canonical in
 [PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md#public-interfaces). Route presence
 and focused tests are not release acceptance by themselves; the integrated and
 real-bank gates remain separately recorded.
+
+The Phase 3 Ask contract is separate from URL-filter query schemas. `AskPlanV1`
+is a strict execute/clarify/unsupported union; execute contains one to three
+aggregate, seasonality, recurring, finding, FX, or transaction-evidence specs.
+`POST /api/ask` accepts a 1–500 character question, explicit `ALL|CA|TZ` market,
+validated IANA timezone, and no more than three prior question/validated-plan
+pairs. A local clarification may add a strict opaque selection and its prior
+execute plan without changing the question. Answered responses include
+normalized/resolved plans, exact-decimal evidence, display hints, analytics
+generation/home currency/threshold policy, source watermark, coverage,
+truncation, and freshness state. SQL, prompts, provider payloads, secrets, and
+model identifiers never cross the public API.
 
 Transaction payloads retain `amountNative`/`currencyNative` as posted account
 truth and add nullable `originalAmount`, `originalCurrency`, `amountBase`,
@@ -224,16 +260,59 @@ Important server-side files:
 |---|---|
 | `apps/web/src/lib/server/db.ts` | Pool, parameterized queries, and canonical account/transaction/Phase 1 analytics read builders |
 | `apps/web/src/lib/server/insights.ts` | Materialized Insights reads, filters, review writes, settings, and rebuild enqueueing |
+| `apps/web/src/lib/server/ask/` | Phase 3 provider adapters, prompts, date resolution, deterministic executor, tokenization, narration validation, and orchestration |
+| `apps/web/src/routes/api/ask/` | Ask status and question HTTP handlers |
 | `apps/web/src/lib/server/phase1.ts` | Account mapping and deduplicated service-job enqueueing |
 | `apps/web/src/lib/server/upload.ts` | Upload validation, encrypted object writes, and ingest job creation |
 | `apps/web/src/lib/server/job-result.ts` | Worker snake_case to public camelCase result validation |
 | `apps/web/src/lib/server/api.ts` | Consistent JSON errors and privacy headers |
 
-`packages/shared-types/src/account.ts`, `analytics.ts`, `category.ts`,
+`packages/shared-types/src/account.ts`, `analytics.ts`, `ask.ts`, `category.ts`,
 `insights.ts`, `institution.ts`, `job.ts`, `query-spec.ts`, `settings.ts`, and
 `transaction.ts` define the public TypeScript contracts. The Python Pydantic
 models mirror the worker side explicitly; they are not generated from
 TypeScript.
+
+## Grounded Ask Flow
+
+1. The Insights Ask tab loads `/api/ask/status` independently so disabled or
+   unavailable AI cannot break deterministic Insights.
+2. `POST /api/ask` validates question length, explicit market, IANA timezone,
+   at most three prior questions plus validated plans, and an optional strict
+   local entity-selection token.
+3. A code-owned gate rejects canonical SQL, write, forecast, advice, balance,
+   and net-worth intents before database/provider work. Otherwise one
+   capable-model call sees only the question/context, the current local date/home
+   currency, and the static DSL catalog. It returns execute, clarify, or
+   unsupported; it cannot inspect schema, SQL, entity catalogs, rows, or
+   results.
+4. Strict validation rejects extra keys and unsupported combinations. Symbolic
+   dates and normalized exact entity matches resolve locally. Missing or
+   ambiguous entities and account/scope conflicts return focused local
+   clarification choices. Database-derived choices use opaque tokens; selecting
+   one keeps the original question unchanged and skips the capable planner.
+5. Execute plans compile one to three specs through code-owned enum branches.
+   Every user/provider value is a bound parameter. One repeatable-read,
+   read-only transaction pins all reads to one matching analytics generation
+   and home currency. Newer transaction, statement, account, category, or
+   merchant state fails closed with `analytics_rebuilding` before any result.
+6. The executor preserves exact PostgreSQL numeric values as decimal strings,
+   bounds tables to 20 rows and monthly series to 120 points, and emits
+   coverage, truncation, watermark, and freshness metadata.
+7. Every database-derived value, date, label, identifier, relationship, and
+   factual clause becomes an opaque request-local reference. At most one cheap
+   narration call may return connective text plus known references.
+8. Unknown references, quantitative literals, currency/percentage syntax,
+   malformed/refused/truncated output, or timeout triggers deterministic local
+   narration without discarding evidence.
+9. Only the browser tab retains up to three prior questions and validated
+   plans. Reload, reset, market change, or home-currency change clears them.
+   The server does not persist or log Ask content.
+
+One request has a 45-second budget, each provider call has a 20-second limit,
+and there is no automatic model retry. Each web process accepts at most two
+concurrent Ask requests. Cancellation propagates from the browser where the
+runtime supports it.
 
 ## Ingestion Flow
 
@@ -246,7 +325,7 @@ TypeScript.
    conventional generic XLSX, the named I&M Tanzania TZS image-PDF layout, and
    deterministic extractable PDF tables.
 6. An unsupported CSV/XLSX may enter the AI column-mapping path. Unsupported
-   or irregular PDF remains deterministic `needs_ai`; Phase 2 never sends PDF
+   or irregular PDF remains deterministic `needs_ai`; Phase 3 never sends PDF
    content to a model or external OCR service.
 7. Parsed rows are normalized with account-kind-aware signs, dated FX rates,
    deterministic categories, merchant identities, and stable dedup hashes.
@@ -288,7 +367,7 @@ TypeScript.
   needs a new adapter version.
 - **Other PDF:** deterministic extractable-table parsing remains available.
   Missing or rejected tables return `needs_ai`; general or irregular-PDF
-  AI/OCR remains outside Phase 2.
+  AI/OCR remains outside Phase 3.
 
 ## Worker Modules and Providers
 
@@ -379,7 +458,7 @@ The completed Phase 1 schema has 12 application tables:
 Migrations are ordered, forward-applied SQL. Never edit an already-applied
 migration to change production behavior; add the next migration.
 
-The current Phase 2 and separately gated Phase 2.1 schema adds eight tables, for
+The completed Phase 2 and separately approved Phase 2.1 schema adds eight tables, for
 20 application tables in total. They are `analytics_run`, `analytics_settings`,
 `analytics_monthly_aggregate`, `recurring_series`, `recurring_occurrence`,
 `insight_finding`, `analytics_threshold_profile`, and
@@ -464,7 +543,7 @@ replace `user_transaction` or `user_merchant` provenance.
 Raw uploads are encrypted before MinIO with a versioned AES-256-GCM envelope.
 Only masked account references persist. MinIO uses a non-root bucket-scoped app
 credential. Authentication, multi-tenancy, and row-level tenant isolation are
-not Phase 2 features, so the local stack must not be exposed as if it were an
+not Phase 3 features, so the local stack must not be exposed as if it were an
 authenticated production service.
 
 ## Tests and Acceptance Commands
@@ -483,6 +562,7 @@ Run the required local gates from the repository root:
 ```sh
 make test
 make check
+make test-ask-postgres
 make benchmark-analytics
 make im-bank-tz-acceptance
 ```
@@ -492,10 +572,20 @@ tests, and Python pytest through the workspace scripts. `make check` runs
 TypeScript/Svelte checks plus Ruff and strict mypy, including all smoke scripts
 and the benchmark script in its static-analysis target set.
 
+`make test-ask-postgres` runs the production Ask executor against a migrated
+PostgreSQL database named by `LEDGER_ASK_POSTGRES_TEST_URL`. Its fixed fixtures
+run inside one advisory-locked transaction and are rolled back, with residue
+and analytics-publication checks afterward. The suite skips when the variable
+is absent; point it only at a dedicated test database whose active settings use
+CAD reporting. CI runs it after clean migrations and idempotent seeds.
+
 `make benchmark-analytics` creates a uniquely prefixed disposable PostgreSQL
 database, applies the checked-in migrations, inserts exactly 100,000 synthetic
 transactions, runs the production full analytics refresh, times five warmed
-materialized reads, enforces the two-minute/one-second limits, and drops the
+materialized Insights reads, seven nonempty production-shaped Ask reads
+(including analytics context, aggregate coverage, and FX lateral-rate work),
+and a three-query read-only/repeatable-read plan. It enforces the two-minute
+rebuild, one-second individual-read, and two-second plan limits and drops the
 database even on failure. It requires a compatible local PostgreSQL server and
 must never target a database whose contents need to be retained.
 
@@ -509,11 +599,24 @@ Run the extended smoke flow only against a disposable, healthy fresh stack:
 
 ```sh
 cp .env.example .env
-WORKER_PROVIDER_MODE=stub docker compose up --build --detach
+ASK_ENABLED=true ASK_PROVIDER_MODE=stub WORKER_PROVIDER_MODE=stub \
+  docker compose up --build --detach
 docker compose ps --all
 curl --fail --silent --show-error http://127.0.0.1:3000/api/health
 make smoke
 ```
+
+Run the opt-in live-provider gate only with Ask enabled, live mode selected,
+and a valid Anthropic key in the environment:
+
+```sh
+make ask-live-acceptance
+```
+
+This command sends its canonical and adversarial acceptance questions to the
+configured live Anthropic models. It is a one-time manual gate before Phase 3
+can enter review, not a CI command. It must not print or persist prompts,
+provider payloads, Ask evidence, or model prose.
 
 After inspecting any failure logs, remove the disposable stack with:
 
@@ -524,31 +627,36 @@ docker compose down --volumes --remove-orphans
 `--volumes` deletes that Compose project's database and object-store volumes;
 do not use it against an environment whose data must be retained.
 
-The active Phase 2 smoke contract carries forward the Phase 0 `2855.59` result
-and zero-row repeat import. It adds synthetic separate USD/TZS accounts,
+The active Phase 3 smoke contract carries forward the Phase 0 `2855.59` result
+and zero-row repeat import plus the completed Phase 2/2.1 synthetic separate
+USD/TZS accounts,
 USD-original/TZS-posted and TZS-original/USD-posted evidence, inline and
 standalone FX fees, three-layer transaction and FX contracts, scoped analytics,
 CAD/TZS maintenance rebuilds, materialized Insights reads, and durable
-finding review. Those synthetic statements complement rather than replace the
-separate I&M Tanzania TZS acceptance. `scripts/phase1_smoke.py` retains the
+finding review. Phase 3 adds stub-planned aggregate comparison, category
+drivers, seasonality coverage, recurring/finding and FX evidence, transaction
+drill-down, scoped follow-up, and fail-closed SQL/write/forecast questions.
+Those synthetic statements complement rather than replace the separate I&M
+Tanzania TZS acceptance. `scripts/phase1_smoke.py` retains the
 historical Phase 1 base-switch flow and supplies reusable helpers, but it is no
 longer the active `make smoke` entry point.
 
 CI is configured to run TypeScript/check/browser tests, Python pytest/Ruff/mypy,
 all ordered migrations and idempotent seeds with retained Phase 1 baseline
-schema assertions, then the Phase 2 stub-provider container smoke job. The new
-Phase 2 focused suites live in the shared, web, component, browser, and worker
-test trees; CI configuration remains a gate definition, not evidence of the
-current working tree's integrated result.
+schema assertions, then the Phase 3 stub-provider container smoke job. Phase 3
+focused Ask suites belong in the shared, web, component, and browser test trees;
+CI configuration remains a gate definition, not evidence of the current
+working tree's integrated result. The live Anthropic acceptance run is an
+opt-in manual release gate and never runs in ordinary CI.
 
-A 2026-07-24 disposable PostgreSQL checkpoint applied migrations `001`–`015`
+A Phase 2/2.1 closure checkpoint applied migrations `001`–`015`
 from empty and upgraded Phase 1 data without changing immutable native truth or
 inferring account markets. It preserved legacy review state, proved scoped
 materialization and market guards, completed a CAD→TZS→CAD round trip with an
 immutable switch audit, fenced publication by active currency, passed
 rollback/reapplication, and refused rollback while TZS was active.
 
-The same date's `make benchmark-analytics` checkpoint loaded exactly 100,000
+The corresponding `make benchmark-analytics` checkpoint loaded exactly 100,000
 synthetic transactions into its disposable database. Full production refresh
 took `16.385s` versus the `120s` limit; the slowest warm materialized read took
 `1.721ms` versus the `1000ms` limit, and the temporary database was removed.
@@ -601,10 +709,11 @@ USD institution adapter is deferred by ADR-0006.
   Phase 1. Phase 2 later accepted the supplied I&M Tanzania TZS PDFs and
   deferred institution-specific USD support under ADR-0006.
 
-## Phase 2 Implementation Checkpoint
+## Phase 2 and Phase 2.1 Closure Evidence
 
 - ADR-0005 through ADR-0008 are accepted and the Phase 2 build plan is
-  published. ADR-0008 governs a separately gated, not-yet-approved Phase 2.1.
+  preserved. Phase 2 and ADR-0008's separately gated Phase 2.1 were approved
+  independently on 2026-07-25.
 - Phase 1 is closed and its permanent reconciliation/idempotency gates carry
   forward.
 - Migrations `012`–`015`, three-layer ingestion and persistence, deferred
@@ -616,7 +725,7 @@ USD institution adapter is deferred by ADR-0006.
   unaffected rows; recurrence and findings use full source history independently
   within `ALL`, `CA`, and `TZ`. Full refresh rebuilds every derived component,
   and publication is atomic and fenced to the active home currency.
-- The active synthetic smoke harness carries forward the golden reconciliation
+- The preserved synthetic smoke harness carries forward the golden reconciliation
   and idempotency gates and exercises explicit scopes, three-layer USD/TZS
   evidence, CAD/TZS round trips, explicit FX fees, analytics refresh, Insights
   reads, and finding review.
@@ -634,9 +743,24 @@ USD institution adapter is deferred by ADR-0006.
   and the largest 17-row statement adds zero rows on repeat. Its end-to-end
   encrypted upload also passes through web, object storage, worker, PostgreSQL,
   home-currency valuation, and Insights coverage.
-- The database, benchmark, fresh-stack, and TZS real-bank results complete the
-  non-deferred acceptance checkpoint. Phase 2 is `in_review`; it must not be
-  marked completed until review is approved.
+- The database, benchmark, fresh-stack, and TZS real-bank results completed the
+  non-deferred acceptance checkpoint. The permanent Phase 0–2.1 gates were
+  rerun before approval and carry forward into Phase 3.
+
+## Phase 3 Implementation State
+
+- ADR-0009, ADR-0010, and the Phase 3 build plan govern the bounded Ask
+  workflow. The
+  earlier iterative tool-using-agent design is superseded.
+- Phase 3 adds strict Ask contracts, a TypeScript provider seam, local
+  date/entity resolution, closed parameterized query compilation, generation-
+  pinned execution, opaque fact references, narration validation/fallback, Ask
+  HTTP routes, and the first/default Insights tab.
+- No migration is expected because the server stores no Ask question, plan,
+  answer, evidence, or conversation state.
+- Phase 3 stays `in_progress` until its deterministic release suite,
+  100,000-transaction Ask benchmark, disposable stub smoke, and one-time live
+  Anthropic acceptance run pass.
 
 After significant documentation changes, sync `docs/` to Confluence when a
 space is configured. It is currently unconfigured, so no publication step can

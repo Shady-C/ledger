@@ -2,11 +2,12 @@
 
 ## Project Scope and Structure
 
-Ledger is a Phase 1 personal-finance application with an executable local
+Ledger is a Phase 3 personal-finance application with an executable local
 stack. Read `docs/PROJECT_CONTEXT.md` first for the active phase and scope,
 treat `docs/ARCHITECTURE.md` as the system-design reference, preserve
-`docs/BUILD-PLAN.md` as the Phase 0 baseline, and use
-`docs/PHASE-1-BUILD-PLAN.md` for the active acceptance gates. Keep work within
+`docs/BUILD-PLAN.md`, `docs/PHASE-1-BUILD-PLAN.md`, and
+`docs/PHASE-2-BUILD-PLAN.md` as completed historical records, and use
+`docs/PHASE-3-BUILD-PLAN.md` for the active acceptance gates. Keep work within
 the current phase unless scope is explicitly updated.
 
 The monorepo layout is:
@@ -28,7 +29,10 @@ The supported project interface is:
 - `make seed`: load development data.
 - `make test`: run all project tests.
 - `make check`: run TypeScript checks plus Python `ruff` and strict `mypy`.
-- `make smoke`: exercise the golden API ingestion path against a healthy fresh stack.
+- `make smoke`: exercise the Phase 3 stub-provider flow, including the golden
+  ingestion path, against a healthy fresh stack.
+- `make ask-live-acceptance`: run the opt-in manual Anthropic acceptance gate;
+  never run it in ordinary CI.
 
 CI must also run TypeScript typechecking plus Python `ruff` and `mypy`. Do not document a command as available until its supporting file is committed.
 
@@ -41,14 +45,27 @@ Use two-space indentation for TypeScript, Svelte, JSON, and YAML; use four space
 Python tests use pytest and follow `test_*.py` naming. Financial changes require
 regression coverage. Preserve the golden reconciliation assertion (closing
 balance `2855.59`), verify repeat ingestion adds zero rows, and test adapter
-detection, sign handling, foreign-spend parsing, and coverage-gap handling. No
-numeric coverage threshold exists; critical ledger and reconciliation paths
-must be covered.
+detection, sign handling, foreign-spend parsing, coverage-gap handling, market
+isolation, and CAD/TZS generation fencing. Phase 3 Ask changes also require
+strict contract, SQL-parameterization, provider-privacy,
+deterministic-fallback, accessibility, and adversarial coverage. No numeric
+coverage threshold exists; critical ledger, reconciliation, analytics, and
+grounded-answer paths must be covered.
 
 ## Commits and Pull Requests
 
-There is no Git history yet. Use `type(scope): description [JIRA-KEY]`, with `feat`, `fix`, `docs`, `refactor`, `test`, or `chore`. Pull requests should describe Phase 0 scope, link the Jira issue, include test/lint results, and add screenshots for UI changes. Any deviation from documented architecture requires an ADR in `docs/decisions/`, related documentation updates, and a `CHANGELOG.md` entry.
+Use `type(scope): description [JIRA-KEY]`, with `feat`, `fix`, `docs`,
+`refactor`, `test`, or `chore`. Pull requests should describe Phase 3 scope,
+link the Jira issue when configured, include test/lint results, and add
+screenshots for UI changes. Any deviation from documented architecture
+requires an ADR in `docs/decisions/`, related documentation updates, and a
+`CHANGELOG.md` entry.
 
 ## Security and Configuration
 
-Commit `.env.example`, never `.env` or credentials. Keep account identifiers masked, sanitize statement fixtures, and minimize financial data sent to external AI services.
+Commit `.env.example`, never `.env` or credentials. Keep account identifiers
+masked, sanitize statement fixtures, and minimize financial data sent to
+external AI services. The Ask planner must never receive schema, SQL, rows,
+results, or entity catalogs; the narrator may receive only request-local opaque
+fact references. Never log or persist Ask questions, plans, evidence, results,
+or prose.

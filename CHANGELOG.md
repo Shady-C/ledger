@@ -2,20 +2,123 @@
 
 All notable changes to Ledger are documented here.
 
-## [Unreleased] — Phase 2
+## [Unreleased] — Phase 3
+
+### Added
+
+- [ADR-0009] Bounded `AskPlanV1` planning, deterministic closed-catalog query
+  execution, and opaque-reference narration with fail-closed local fallback.
+- [ADR-0010] Fail-closed source freshness, stateless local entity-clarification
+  tokens, and code-owned enforcement for canonical prohibited Ask intents.
+- The Phase 3 source-of-truth build plan covering supported Ask datasets,
+  public outcomes, privacy boundaries, evidence rendering, performance, and
+  release gates.
+- A read-only Ask workflow for Insights with independent status, bounded
+  conversation context, normalized-query inspection, and auditable
+  table/chart/drill-down evidence.
+- Strict Ask contracts and provider seams for live Anthropic or deterministic
+  stub planning and narration.
+- Active `make smoke` stub coverage and the opt-in manual
+  `make ask-live-acceptance` gate for canonical and adversarial questions.
+- The disposable 100,000-transaction benchmark now times seven nonempty,
+  production-shaped Ask reads—including analytics context, aggregate coverage,
+  and FX lateral-rate work—and a three-query read-only snapshot against the
+  Phase 3 one-second/two-second limits without weakening the earlier analytics
+  gates.
+- An opt-in real-PostgreSQL Ask executor suite with transaction-scoped fixtures,
+  exact aggregate/grouping/comparison assertions, market isolation, partial-FX
+  coverage, and CI execution against the migrated database.
+
+### Changed
+
+- Closed Phase 2 and the separately approved Phase 2.1 on 2026-07-25 and moved
+  the active project phase to Phase 3 `in_progress`.
+- Replaced the earlier iterative tool-using-agent design with at most one
+  planning call, one deterministic read transaction, and one optional
+  tokenized narration call.
+- Pinned FX evidence to a rate watermark captured inside the analytics
+  snapshot, preserved source/rate cutoffs at PostgreSQL microsecond precision,
+  and made newer mutable rate data require a refreshed generation.
+- Made every evidence string explicitly bounded, preserved recurring,
+  transaction, and FX money/rate values as typed exact-decimal cells, reported
+  real recurring/finding coverage, and kept ledger-source freshness separate
+  from mutable FX-rate freshness.
+- Strengthened the deterministic stub and live-provider acceptance harnesses
+  with time-stable ranges, exact values and coverage, scoped evidence checks,
+  and a live-only plan discriminator that the fixture provider cannot satisfy.
+- Scoped recurring occurrence counts, displayed evidence, and price-change
+  calculations to the resolved question range instead of all series history.
+- Extended analytics source watermarks through account/category/merchant label
+  inputs and made Ask reject initial or mid-planning source drift rather than
+  mixing mutable current rows with a published generation.
+
+### Security
+
+- Ask sends no schema, SQL, database rows, result values, entity catalogs, raw
+  evidence, or transaction descriptions to its planner. Its narrator receives
+  only request-local opaque fact references, and no Ask content is persisted or
+  logged.
+- Local database-derived clarification labels and masked references are selected
+  with opaque tokens and resolved inside the read-only snapshot; they are never
+  appended to, or sent with, a planner question.
+- Ask is disabled independently by default, uses no-store responses, remains
+  outside service-worker caches, enforces provider/request timeouts, and limits
+  each web process to two concurrent requests.
+
+### Verification checkpoint
+
+- The local deterministic checkpoint passes 39 shared-contract tests, 155 web
+  server tests, 17 component tests, and 196 worker tests with one intentional
+  worker skip; the 10 opt-in PostgreSQL executor cases discover and skip cleanly
+  when their dedicated database URL is absent.
+- TypeScript/Svelte checks report zero errors and warnings, Ruff and strict mypy
+  pass across the worker and acceptance scripts, and the production SvelteKit
+  build completes.
+- The disposable 100,000-transaction benchmark completes the analytics rebuild
+  in `15.191s`, its slowest warm Ask read in `87.187ms`, and a three-query plan
+  in `107.697ms`, within the `120s`, `1s`, and `2s` gates respectively.
+- Playwright discovers all 23 browser tests. Real PostgreSQL execution,
+  fresh-stack smoke, browser execution, and the opt-in live Anthropic run remain
+  required before Phase 3 can move to `in_review`.
+
+## [Phase 2.1 — Configurable Home Currency] — 2026-07-25
+
+### Added
+
+- [ADR-0008] Separately approved support for stable CAD/TZS home reporting with
+  direct native recomputation, currency-fenced analytics publication, frozen
+  threshold profiles, and immutable switch auditing.
+- Ordered migration `015` for CAD/TZS threshold profiles, generalized reporting
+  values, home-currency switch evidence, matching-currency publication, and
+  refusal to roll back while TZS is active.
+- Confirmed Advanced maintenance controls, an explicit Insights rebuilding
+  state, and CAD/TZS reporting round trips that never relabel stale values.
+
+### Changed
+
+- Superseded only ADR-0005's Stage 1 fixed-CAD clause and ADR-0004's public
+  switching semantics; native money, reconciliation, market scope, and all
+  other Phase 2 decisions remain unchanged.
+
+### Verification
+
+- Disposable database acceptance proved CAD→TZS→CAD rebuilding from immutable
+  native money, identity and missing-rate handling, frozen thresholds,
+  immutable switch auditing, fenced analytics publication,
+  rollback/reapplication, and refusal to roll back while TZS was active.
+- The isolated fresh-stack smoke covered CAD/TZS maintenance and matching-
+  currency Insights while preserving the permanent reconciliation,
+  idempotency, scope, and analytics gates.
+- Phase 2.1 was reviewed and approved separately from Phase 2 on 2026-07-25.
+
+## [Phase 2 — Three-Layer Money and Deep Insights] — 2026-07-25
 
 ### Added
 
 - [ADR-0007] Explicit Canada/Tanzania account scopes, a separate market
   profile, market-scoped analytics, and progressive transaction disclosure.
-- [ADR-0008] Separately gated Phase 2.1 support for stable CAD/TZS home
-  reporting with direct native recomputation, currency-fenced analytics
-  publication, and frozen threshold profiles. Its implementation is present;
-  approval remains separate from Phase 2.
-- Ordered migrations `014` and `015` for explicit account markets, the market
-  profile, scoped analytics identity, CAD/TZS threshold profiles, generalized
-  reporting values, immutable home-currency switch auditing, currency-fenced
-  publication, and refusal to roll back while TZS is active.
+- Ordered migration `014` for explicit account markets, the market profile, and
+  scoped analytics identity.
 - Optional market filters across accounts, transactions, ordinary analytics,
   FX, and Insights, plus canonical transaction-detail conversion evidence.
 - A shared All/Canada/Tanzania selector, single-amount Activity rows, responsive
@@ -43,8 +146,8 @@ All notable changes to Ledger are documented here.
   standalone FX-fee evidence.
 - An active synthetic Phase 2 smoke harness carrying forward the `2855.59` and
   zero-row repeat gates while covering separate USD/TZS accounts, three-layer
-  money, explicit market scopes, CAD/TZS maintenance round trips, explicit FX
-  fees, analytics refresh, and Insights review.
+  money, explicit market scopes, explicit FX fees, analytics refresh, and
+  Insights review.
 - The `im_bank_tz_pdf_v1` adapter, sanitized OCR-text regression fixtures, and
   `make im-bank-tz-acceptance` gate. The adapter cross-checks each local OCR
   amount with running-balance movement, printed totals, and the closing balance
@@ -54,7 +157,7 @@ All notable changes to Ledger are documented here.
 
 - Reopened Phase 2 for ADR-0007 review remediation while keeping one repository,
   ledger, ingestion pipeline, and deterministic analytics engine, then returned
-  it to `in_review` after the expanded gates passed.
+  it to review after the expanded gates passed.
 - Moved balance/cash-flow exploration into Insights and analytics health,
   sensitivity, readiness, and rebuild controls into Settings Advanced.
 - Advanced the active project phase to Phase 2, accepted the supplied I&M
@@ -62,8 +165,7 @@ All notable changes to Ledger are documented here.
   institution adapter under ADR-0006.
 - Extended transaction ingestion and response contracts with original money,
   explicit FX-fee evidence, nullable reporting valuation, and `pending_fx`.
-  Stage 1 fixed public reporting to CAD; ADR-0008 now governs the separate
-  CAD/TZS maintenance workflow.
+  Stage 1 fixed public reporting to CAD.
 - Made incremental analytics refreshes rebuild changed monthly aggregate
   periods and copy unaffected rows, while recomputing recurrence and findings
   from full source history independently within `ALL`, `CA`, and `TZ`; full and
@@ -83,22 +185,21 @@ All notable changes to Ledger are documented here.
 
 ### Verification checkpoint
 
-- A disposable PostgreSQL run applied migrations `001`–`015` from empty and
-  upgraded Phase 1 data without changing immutable native truth or inferring
-  markets. It preserved legacy finding review state, exercised scoped
-  materialization and market guards, proved CAD→TZS→CAD rebuilding and immutable
-  switch auditing, fenced publication by active currency, passed
-  rollback/reapplication, and refused rollback while TZS was active.
+- A disposable PostgreSQL closure run applied migrations `001`–`015` from
+  empty. Its Phase 2 checks upgraded Phase 1 data without changing immutable
+  native truth or inferring markets, preserved legacy finding review state,
+  exercised scoped materialization and market guards, and passed the Phase 2
+  upgrade assertions. Phase 2.1-specific checks are recorded separately above.
 - `make benchmark-analytics` populated a disposable migrated database with
   exactly 100,000 synthetic transactions. The production full refresh completed
   in `16.385s` (limit `120s`) and its slowest warm materialized read in `1.721ms`
   (limit `1000ms`), then removed the temporary database.
 - A uniquely named disposable fresh stack passed the active Phase 2 `make
-  smoke` contract on rebuilt images and clean migrations `001`–`015` plus seed:
+  smoke` contract on rebuilt images and the closure schema plus seed:
   the Phase 0 fixture reconciled to `2855.59` with six rows and zero on repeat;
   synthetic USD/TZS accounts covered explicit market scopes, both
-  original/posted directions, CAD/TZS round trips, explicit FX evidence,
-  analytics refresh, materialized Insights reads, and durable finding review.
+  original/posted directions, explicit FX evidence, analytics refresh,
+  materialized Insights reads, and durable finding review.
   The named Compose project and volumes were removed without touching the
   default user stack. This synthetic evidence complements the real-bank gate.
 - All 11 supplied sanitized I&M Tanzania TZS image-PDF statements matched
@@ -114,7 +215,7 @@ All notable changes to Ledger are documented here.
   worker tests plus 1 intentional worker skip; and the `pnpm build` production
   build.
   With the real TZS gate accepted and named USD support deferred by ADR-0006,
-  Phase 2 has advanced to `in_review`; closure still requires review approval.
+  Phase 2 was reviewed and approved on 2026-07-25.
 
 ## [Phase 1 — Multi-Bank and Multi-Currency] — 2026-07-24
 

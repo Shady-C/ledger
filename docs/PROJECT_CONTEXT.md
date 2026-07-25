@@ -1,7 +1,7 @@
 # Ledger — Project Context
 
-Current Phase: 2
-Phase Status: in_review
+Current Phase: 3
+Phase Status: in_progress
 Jira Epic: N/A
 Confluence Space: N/A
 
@@ -9,73 +9,69 @@ Confluence Space: N/A
 
 Ledger is a self-hostable personal-finance application that imports bank
 statements into one auditable canonical ledger. Financial values are parsed,
-stored, reconciled, converted, aggregated, and analyzed with deterministic
-code. Phase 2 makes original, account-posted, and reporting money explicit
-and adds materialized trends, recurring-series detection, and explainable
-reviewable findings.
+stored, reconciled, converted, aggregated, queried, and analyzed with
+deterministic code. Phase 3 adds a bounded natural-language Ask workflow over
+the completed market-scoped analytics without allowing a model to inspect the
+database, generate SQL, or calculate money.
 
 The detailed system design lives in [ARCHITECTURE.md](ARCHITECTURE.md). Preserve
-[BUILD-PLAN.md](BUILD-PLAN.md) as the Phase 0 baseline and
-[PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) as the completed Phase 1 record.
-The active backlog and acceptance gates live in
-[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). The practical module and
+[BUILD-PLAN.md](BUILD-PLAN.md) as the Phase 0 baseline,
+[PHASE-1-BUILD-PLAN.md](PHASE-1-BUILD-PLAN.md) as the completed Phase 1 record,
+and [PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md) as the completed Phase 2/2.1
+record. The active backlog and acceptance gates live in
+[PHASE-3-BUILD-PLAN.md](PHASE-3-BUILD-PLAN.md). The practical module and
 operations map is [CODEBASE_HANDOFF.md](CODEBASE_HANDOFF.md).
 
-## Phase 2 Scope
+## Phase 3 Scope
 
-Phase 2 is complete when the local stack can:
+Phase 3 is complete when the local stack can:
 
-1. Preserve every Phase 0/1 ingestion, idempotency, reconciliation, privacy,
-   and security guarantee, including the `2855.59` closing balance.
-2. Represent optional original purchase money, exact account-posted money, and
-   nullable derived reporting money without conflating the three layers.
-3. Import a statement only into an account of the same posted currency, reject
-   mixed posted currencies, and keep separate TZS and USD account balances.
-4. Persist and reconcile valid native transactions when reporting rates are missing,
-   report them as `pending_fx`, and backfill only derived valuation later.
-5. Accept the supplied sanitized real I&M Tanzania TZS-account statements
-   through a versioned institution adapter with exact reconciliation and
-   zero-row repeat imports. Institution-specific USD statement acceptance is
-   deferred by ADR-0006; generic USD ledger behavior remains covered.
-6. Materialize deterministic trends, comparisons, seasonality, recurring
-   activity, renewals, price changes, and explainable findings.
-7. Preserve user recurring corrections and finding review state through
-   incremental and full analytics refreshes.
-8. Provide All/Canada/Tanzania account scopes, a single posted amount with
-   progressively disclosed conversion evidence, an accessible `/insights`
-   workflow, and a compact three-section Dashboard.
-9. Meet the regression, performance, production-build, clean-migration/seed,
-   and disposable fresh-stack gates in the Phase 2 build plan.
+1. Preserve every Phase 0–2.1 ingestion, idempotency, reconciliation,
+   home-currency, analytics, privacy, and security guarantee, including the
+   `2855.59` closing balance.
+2. Translate one 1–500 character question into a strict `AskPlanV1` execute,
+   clarify, or unsupported outcome with no more than three closed-catalog
+   queries.
+3. Resolve dates, scope, currency, and entities locally and execute only
+   code-owned parameterized SQL in one read-only, repeatable-read transaction
+   pinned to one analytics generation; reject mutable source/entity state newer
+   than that generation.
+4. Answer supported aggregate, seasonality, recurring, finding, FX, and
+   transaction-evidence questions with exact-decimal values and explicit
+   coverage, truncation, watermark, and freshness metadata.
+5. Give the planner no schema, SQL, rows, results, or entity catalogs and give
+   the optional narrator only request-local opaque fact references. Local entity
+   clarification labels use server-resolved tokens and never re-enter the
+   planner question.
+6. Fall back to deterministic narration whenever provider output is malformed,
+   refuses, times out, invents a reference, or contains a numeric, currency, or
+   percentage literal.
+7. Add Ask as the first/default Insights tab without degrading deterministic
+   Insights when Ask is disabled or unavailable, and keep no persistent chat
+   or answer history.
+8. Meet the contract, database, privacy, adversarial, accessibility,
+   regression, performance, fresh-stack stub, and one-time live-provider gates
+   in the Phase 3 build plan.
 
-Forecasting, natural-language querying, outbound notifications,
-authentication/multi-user tenancy, irregular-PDF AI extraction, investments,
-budgets, and manual assets or liabilities are outside Phase 2.
+Forecasting, balances/net worth questions, import or reconciliation
+exploration, advice, writes, saved history, streaming, prompt/result caching,
+outbound notifications, authentication/multi-user tenancy, irregular-PDF AI
+extraction, investments, budgets, and manual assets or liabilities are outside
+Phase 3.
 
 ## Implementation State
 
-Phase 1 completed on 2026-07-24. Its recorded integrated test, static-check,
-production-build, clean migration/seed, and disposable fresh-stack synthetic
-smoke gates passed. The Phase 1 implementation includes the multi-account data
-model, four service-job kinds, OFX/QFX and validated tabular ingestion,
-governed categorization, historical FX caching, account/net-worth analytics,
-and five focused application routes.
+Phase 1 completed on 2026-07-24. Phase 2 and its separately approved Phase 2.1
+follow-up completed on 2026-07-25 after the permanent Phase 0–2.1 regression
+gates were rerun and the recorded review evidence was accepted. Phase 2
+delivered three-layer money, deferred valuation, deterministic materialized
+analytics, explicit All/Canada/Tanzania scopes, progressive conversion
+evidence, deep Insights, and the accepted I&M Tanzania TZS adapter. Phase 2.1
+separately delivered stable CAD/TZS home reporting, direct native
+recomputation, frozen materiality profiles, and currency-fenced analytics
+publication under ADR-0008.
 
-Phase 2 review identified an information-hierarchy and market-scoping gap.
-ADR-0007 remediation is now implemented alongside the separately gated
-ADR-0008 Phase 2.1 follow-up. Migrations `012`–`015`, the three-layer
-worker/persistence paths, deterministic generic CSV/XLSX support, market-scoped
-materialized analytics, shared contracts, scoped APIs, transaction conversion
-details, the simplified Home and Activity experiences, Insights FX, Settings
-Advanced, `/more`, and configurable CAD/TZS home reporting are present in the
-working tree. Incremental refreshes recompute monthly aggregates for source
-months changed since the published watermark and copy unaffected monthly rows
-into the new generation; recurring series and findings are deliberately
-recomputed from full source history independently within each `ALL`, `CA`, and
-`TZ` scope because their evidence can cross period boundaries. Full mode
-rebuilds all derived data, and both modes publish one currency-fenced generation
-atomically.
-
-The final automated synthetic verification checkpoint passes:
+The Phase 2/2.1 closure evidence includes:
 
 - `make check`: Svelte reports zero errors and zero warnings; Ruff passes; and
   strict mypy succeeds across 32 source/script files.
@@ -100,7 +96,7 @@ The final automated synthetic verification checkpoint passes:
   review. Its disposable project/volumes were removed, and the default user
   stack was untouched.
 
-The supplied local acceptance set now covers eleven sanitized I&M Bank Tanzania
+The supplied local acceptance set covers eleven sanitized I&M Bank Tanzania
 TZS image-PDF statements through `im_bank_tz_pdf_v1`. All eleven reconcile
 exactly, representing 41 transactions and five valid zero-activity statements.
 The largest statement contributes 17 rows on first import and zero on repeat;
@@ -113,21 +109,19 @@ ADR-0006 defers a named real-USD institution adapter until a sanitized sample is
 supplied. Generic USD CSV/XLSX/OFX behavior and both original/posted currency
 directions remain covered by deterministic synthetic tests. The supplied PDFs
 remain local ignored inputs; only sanitized OCR-text derivatives are checked in.
-The real TZS and expanded automated gates remain satisfied. Market-scoped UX
-review remediation is complete, so Phase 2 has returned to `in_review`.
-Phase 2.1 implementation is present but remains a separate approval gate.
+The real TZS and expanded automated gates remained satisfied through closure.
 
-ADR-0007 keeps one product and financial engine while adding explicit nullable
-account market membership, a separate ledger market profile, and materialized
-All/Canada/Tanzania analytics. Unassigned upgraded accounts remain visible only
-under All. ADR-0008 defines the separately gated Phase 2.1 follow-up: the stable
-home reporting currency may be CAD or TZS, switches rebuild exclusively from
-immutable native money under the ledger advisory lock, and Insights enter an
-explicit maintenance state until a matching-currency generation is published.
+Phase 3 is now `in_progress`. ADR-0009 replaces the earlier iterative-agent
+sketch with a bounded `AskPlanV1` planner, a closed deterministic executor, and
+an optional tokenized narrator. ADR-0010 adds fail-closed mutable-source
+freshness, local-only entity clarification, and code-owned prohibited-intent
+enforcement. No schema migration is planned because Ask state is not persisted.
+The implementation must remain `in_progress` until all Phase 3 deterministic
+gates and the one-time live Anthropic acceptance gate pass.
 
 ## Technology Stack
 
-| Area | Phase 2 choice |
+| Area | Phase 3 choice |
 |---|---|
 | Web UI and BFF | SvelteKit, TypeScript, adapter-node |
 | Shared contracts | TypeScript types and Zod schemas with exact decimal strings |
@@ -135,22 +129,24 @@ explicit maintenance state until a matching-currency generation is published.
 | Database and queue | PostgreSQL 16 with pgvector, ordered SQL migrations, and discriminated jobs |
 | Object storage | MinIO through the S3 API |
 | FX rates | Frankfurter v2 public or self-hosted API with PostgreSQL cache |
-| AI provider | Provider seam with Anthropic structured outputs for bounded mapping/categorization only |
+| AI provider | Anthropic behind worker and TypeScript provider seams; deterministic stub modes for tests |
+| Ask | Bounded synchronous planner, closed deterministic query executor, opaque-reference narrator |
 | Analytics | Deterministic Python/SQL materialization with durable reviewed findings |
 | Charts | uPlot for dense series; ECharts for comparisons and Insights views |
 | Local orchestration | Docker Compose and Make |
-| Quality gates | TypeScript checking, Vitest, Playwright, pytest, Ruff, mypy, smoke and the disposable 100k analytics benchmark |
+| Quality gates | TypeScript checking, Vitest, Playwright, pytest, Ruff, mypy, smoke and the disposable 100k analytics/Ask benchmark |
 
 ## Architecture
 
 The SvelteKit service owns the browser UI and HTTP API. It stores encrypted
-uploads in MinIO, writes jobs to PostgreSQL, and serves parameterized ledger and
-Insights reads. In the Phase 2 implementation, the Python worker claims queued work
+uploads in MinIO, writes jobs to PostgreSQL, and serves parameterized ledger,
+Insights, and Phase 3 Ask reads. The Python worker claims queued work
 with row locking, selects or learns a validated adapter, normalizes and
 persists native rows, reconciles statements, enriches available reporting valuation,
 and materializes analytics. PostgreSQL remains the source of truth for ledger
 rows, cached rates, analytics snapshots, finding review state, settings, and
-run metadata.
+run metadata. Ask remains synchronous in SvelteKit and stores no question,
+plan, result, or conversation state.
 
 The Phase 2 processing contract adds `analytics_refresh` after successful
 ingestion, category/proposal or transaction corrections, and FX backfills. Its
@@ -162,7 +158,7 @@ deduplicated, report their affected periods, and publish atomically so readers
 do not observe a partial snapshot. Models may propose redacted mappings or
 categories; no model computes money, statistics, recurring series, or findings.
 
-## Canonical Phase 2 Data
+## Canonical Ledger and Analytics Data
 
 A transaction has three separate monetary layers:
 
@@ -197,9 +193,9 @@ generation is bound to its home currency and frozen threshold-policy version.
 |---|---|---|
 | 0 | Ledger core, deterministic ingestion, basic dashboard | Completed |
 | 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | Completed 2026-07-24 |
-| 2 | Three-layer money, real TZS acceptance, market-scoped UX, deep analytics and Insights | In review |
-| 2.1 | Stable CAD/TZS home reporting and currency-fenced analytics rebuilds | Implementation present; approval gated |
-| 3 | Grounded natural-language query layer | Not started |
+| 2 | Three-layer money, real TZS acceptance, market-scoped UX, deep analytics and Insights | Completed 2026-07-25 |
+| 2.1 | Stable CAD/TZS home reporting and currency-fenced analytics rebuilds | Completed separately 2026-07-25 |
+| 3 | Bounded grounded Ask workflow | In progress |
 | 4 | Ingestion hardening, adapter review/schema evolution, offline polish, forecasts | Not started |
 
 ## Key Design Decisions
@@ -230,31 +226,43 @@ generation is bound to its home currency and frozen threshold-policy version.
 - Support only CAD and TZS as stable home currencies, rebuilding reporting
   values from immutable native money and fencing analytics publication per
   [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md).
+- Use one bounded, validated Ask plan; execute only code-owned parameterized
+  reads; and expose database facts to narration only as request-local opaque
+  references per
+  [ADR-0009](decisions/0009-bounded-tokenized-grounded-ask.md).
+- Fail closed on mutable source drift and keep database-derived clarification
+  selections outside provider payloads per
+  [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md).
 
 ## Environment and Data Safety
 
 The committed `.env.example` is authoritative for database, object-storage,
-statement encryption, services, FX endpoint/staleness, polling, and AI provider
-configuration. Home currency is persisted ledger state and may be changed only
+statement encryption, services, FX endpoint/staleness, polling, worker AI, and
+Ask provider configuration. `ASK_ENABLED=false` is the independent default;
+`ASK_PROVIDER_MODE=live|stub` defaults to live Anthropic or selects deterministic
+fixtures while reusing the existing Anthropic key and capable/cheap model
+settings. `ASK_PROVIDER_TIMEOUT_MS=20000` bounds each provider call. Home
+currency is persisted ledger state and may be changed only
 through the confirmed Advanced maintenance workflow. Real `.env` files and credentials must
 never be committed. Losing the production statement-encryption key makes
 stored raw files unreadable.
 
 Store only masked account references and sanitized test data. Real statement
-samples must be sanitized before they become fixtures. Minimize financial data
-sent to external AI services; no model receives complete statements, balances,
-analytics histories, or finding calculations.
+samples must be sanitized before they become fixtures. Ask's planner receives
+no schema, SQL, rows, results, or entity catalog, and its narrator receives
+only opaque fact references. No model receives complete statements, balances,
+analytics histories, raw transaction evidence, or finding calculations.
 
 ## Working Agreements
 
-- Stay within active Phase 2 scope unless the source-of-truth documents and
+- Stay within active Phase 3 scope unless the source-of-truth documents and
   phase metadata are explicitly changed.
 - Record material deviations in `docs/decisions/`, update affected docs, and
   append `CHANGELOG.md` before implementation diverges.
 - Never let an LLM perform arithmetic, statistics, or a direct ledger write.
 - Add named bank adapters only from sanitized real fixtures and version each
   institution/export layout.
-- Do not advance Phase 2 from review to complete until review is approved and
-  every non-deferred acceptance gate remains green.
+- Do not advance Phase 3 to `in_review` until every deterministic acceptance
+  gate and the one-time live Anthropic acceptance run pass.
 - `docs/` is canonical. Confluence is only a future publish target; Jira and
   Confluence are currently unconfigured.

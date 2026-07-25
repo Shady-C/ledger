@@ -1,8 +1,13 @@
 # Ledger — Phase 2 Build Plan
 
 Current Phase: 2
-Phase Status: in_review
+Phase Status: completed
 Jira Epic: N/A
+Completed: 2026-07-25
+
+> Phase 2 and the separately gated Phase 2.1 follow-up were approved
+> independently on 2026-07-25. This plan is preserved as their historical
+> implementation and acceptance record.
 
 ## Outcome
 
@@ -135,9 +140,9 @@ on repeat, and passed explicit market scopes, USD/TZS three-layer evidence,
 CAD/TZS round trips, FX evidence, analytics, and Insights review. The named
 disposable project and volumes were removed without touching the default user
 stack. Together with the real TZS acceptance evidence above, these results
-return Phase 2 to `in_review`. Phase 2.1 implementation remains separately
-unapproved; no Phase 2 retrospective is recorded until Phase 2 review is
-approved.
+returned Phase 2 to review. Phase 2 and the separately gated Phase 2.1
+follow-up were then approved independently on 2026-07-25 after the permanent
+regression gates were rerun.
 
 ## Public Interfaces
 
@@ -290,7 +295,7 @@ values remain exact decimal strings.
 - Documentation, contracts, migration state, UI behavior, and the developer
   handoff must agree before closure.
 
-## Review State
+## Closure State
 
 The real-bank gate is satisfied by the 11 sanitized I&M Tanzania TZS statements
 accepted through `im_bank_tz_pdf_v1`, with exact reconciliation and zero-row
@@ -299,6 +304,8 @@ OCR-text derivatives provide CI-safe parser regression coverage. Generic USD
 ledger behavior remains tested, but institution-specific USD statement support
 is deferred until a sanitized sample is supplied and explicitly scheduled.
 
-ADR-0007 review remediation and every expanded gate above have passed, so
-Phase 2 is `in_review`. ADR-0008's Phase 2.1 implementation is present but
-remains a separate, unapproved gate that begins only after Phase 2 approval.
+ADR-0007 review remediation and every expanded gate above passed. Phase 2 was
+approved and completed on 2026-07-25. ADR-0008's Phase 2.1 home-currency work
+was evaluated as a separate gate and approved independently on the same date;
+its approval did not retroactively change the Phase 2 scope. The permanent
+Phase 0–2.1 regression gates carry forward into Phase 3.

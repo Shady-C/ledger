@@ -2,13 +2,13 @@
 
 > Long-term target: a self-hostable, multi-institution, multi-currency personal
 > finance analytics app that normalizes supported statements into one canonical
-> ledger, computes money deterministically, and later adds a grounded
+> ledger, computes money deterministically, and adds a grounded
 > natural-language layer.
 
-**Status:** Phase 1 completed on 2026-07-24. ADR-0007 remediation and the
-expanded gates pass, so Phase 2 is `in_review`. ADR-0008's CAD/TZS home-currency
-implementation is present as a separately gated, unapproved Phase 2.1. A named
-USD institution adapter is deferred under ADR-0006.
+**Status:** Phase 1 completed on 2026-07-24. Phase 2 and its separately approved
+Phase 2.1 follow-up completed on 2026-07-25. Phase 3 is `in_progress` under
+ADR-0009 and its ADR-0010 freshness/clarification refinement. A named USD
+institution adapter remains deferred under ADR-0006.
 **Audience:** the person building it (you).
 **Author's stance:** every tech choice below is argued, not defaulted. Where I
 picked a non-obvious tool, there's an ADR explaining what I rejected and why.
@@ -27,7 +27,7 @@ picked a non-obvious tool, there's an ADR explaining what I rejected and why.
 
 ### Non-goals (v1)
 - Not a budgeting-envelope app, not a bill-pay tool, not a bank aggregator with live API links (Plaid-style) — that's a possible v3, but statement ingestion is the trust-minimizing, bank-agnostic starting point.
-- Not multi-tenant SaaS at launch. Phase 2 remains a single-user, single-ledger local
+- Not multi-tenant SaaS at launch. Phase 3 remains a single-user, single-ledger local
   application; authentication, tenant ownership, billing, and organizations are
   later concerns.
 - No tax filing, no investment portfolio pricing (v2+).
@@ -41,7 +41,10 @@ These are load-bearing. Every later decision derives from them.
 1. **Money is computed, never generated.** LLMs never do arithmetic or produce a figure that reaches a balance, total, or chart. All financial values come from deterministic code over the canonical ledger.
 2. **AI proposes, deterministic code disposes.** AI output is always a *proposal* (a category, a column mapping, a query spec) that is validated by code before it has any effect. Invalid proposals are rejected, not trusted.
 3. **Grounded answers only.** The NL layer answers strictly from tool results (executed queries). If a number isn't in a tool result, it doesn't appear in the answer. No free-text finance.
-4. **Run AI once, then cache and learn.** The expensive AI passes (format mapping, categorizing a new merchant) happen once per *novel* input, then the learned result is persisted and reused deterministically forever.
+4. **Learn only durable enrichment.** Format mapping and categorizing a new
+   merchant happen once per novel input and are persisted after validation.
+   Interactive Ask planning/narration is bounded per request and is never
+   persisted or cached.
 5. **Model tiering by task.** Cheap model for high-volume small jobs; capable model for genuinely hard extraction/planning. (Table in §10.)
 6. **Every transaction is idempotent and auditable.** Re-uploading the same or overlapping statement never double-counts. Every derived value can be traced to source rows.
 7. **Money has three layers.** Optional original purchase money and required
@@ -57,7 +60,7 @@ These are load-bearing. Every later decision derives from them.
 
 ---
 
-## 3. System architecture (Phase 2 implementation)
+## 3. System architecture (Phase 3)
 
 ```mermaid
 flowchart TB
@@ -67,6 +70,7 @@ flowchart TB
 
     subgraph Edge["App / API tier — TypeScript"]
         API["API + BFF<br/>validation · reads · orchestration"]
+        ASK["Grounded Ask<br/>plan · validate · execute · tokenize"]
     end
 
     subgraph Work["Ingestion & services — Python worker"]
@@ -75,7 +79,7 @@ flowchart TB
     end
 
     subgraph AI["AI providers (bounded)"]
-        LLM["LLM: redacted column mapping<br/>and categorization tail"]
+        LLM["LLM: redacted enrichment<br/>and bounded Ask calls"]
     end
 
     subgraph Data["State"]
@@ -85,7 +89,10 @@ flowchart TB
     end
 
     UI <--> API
+    API <--> ASK
     API --> PG
+    ASK -->|"read-only, parameterized"| PG
+    ASK --> LLM
     API -- enqueue job --> PG
     ING -- poll jobs --> PG
     SVC -- poll jobs --> PG
@@ -104,6 +111,7 @@ flowchart TB
 |---|---|---|
 | **Client (PWA)** | SvelteKit/TS | Focused ledger routes plus Insights, charts, bounded offline dashboard reads, and responsive installability. |
 | **API / BFF** | Node/TS | Request validation, encrypted uploads, parameterized reads, exact-decimal contracts, review writes, and job orchestration. |
+| **Grounded Ask** | Node/TS | Bounded planning, strict DSL validation, read-only query execution, evidence tokenization, narration validation, and deterministic fallback. |
 | **Python worker** | Python | Parse, normalize, deduplicate, reconcile, enrich FX, categorize the unknown tail, and atomically materialize deterministic analytics. |
 | **Postgres** | — | Source of truth for the ledger, learned mappings, FX rates, jobs, analytics snapshots, findings, and review state. |
 | **Object store** | — | Application-encrypted raw uploads through the S3 API; MinIO in the local stack. |
@@ -116,8 +124,9 @@ processing, and exact `Decimal`/standard-library statistics for the current
 trend and anomaly work. Everything
 user-facing and orchestration-shaped is TypeScript so the client and API share
 one type system. This is a deliberate trade: one extra runtime in exchange for
-the right tool on each side. Phase 2 adds the deterministic analytics engine;
-the grounded ask service described in §9 remains Phase 3 design.
+the right tool on each side. Phase 2 added the deterministic analytics engine;
+Phase 3 adds the synchronous grounded Ask service described in §9 without
+moving financial arithmetic into Node or a model.
 
 ---
 
@@ -661,27 +670,77 @@ history for finding detection.
 
 ## 9. "Ask it things" — Phase 3 design
 
-This subsystem is not implemented in Phase 2. Its trust rule remains:
-**the model
-never sees the database and never emits a number.** It translates and narrates;
-code computes.
+Phase 3's trust rule is: **models never see the database, generate SQL, or
+author a financial fact.** A capable model proposes one bounded plan; code
+validates and computes; an optional cheap model may join opaque facts with
+non-quantitative connective text.
 
 ```mermaid
 flowchart TB
-    q["your question<br/>'how much did I spend on travel in TZS last quarter vs before?'"]
-    q --> plan["LLM: question → QUERY SPEC (JSON)<br/>metrics, filters, group-by, time range, compare"]
-    plan --> val{validate spec<br/>against schema + catalog}
-    val -- invalid --> clarify["ask you to clarify /<br/>repair spec"]
-    val -- valid --> exec["deterministic executor<br/>→ parameterized SQL / aggregate read"]
-    exec --> res["result set (real numbers)"]
-    res --> narr["LLM: narrate result<br/>(only numbers from result set)"]
-    narr --> ans["answer + the table/chart it's based on"]
+    q["Question + explicit scope/timezone<br/>+ up to 3 prior validated plans"]
+    q --> plan["One capable-model call<br/>→ AskPlanV1"]
+    plan --> val{"Strict plan + catalog validation"}
+    val -->|"clarify"| clarify["One focused local clarification"]
+    val -->|"unsupported/invalid"| stop["Fail closed with stable guidance"]
+    val -->|"1–3 valid queries"| resolve["Resolve dates, scope, currency,<br/>and exact entities locally"]
+    resolve --> exec["One repeatable-read, read-only transaction<br/>→ code-owned parameterized SQL"]
+    exec --> evidence["Exact deterministic evidence<br/>pinned to one analytics generation"]
+    evidence --> token["Replace every database fact<br/>with an opaque request-local reference"]
+    token --> narr["Optional one cheap-model call<br/>→ structured reference segments"]
+    narr --> guard{"References and literal policy valid?"}
+    guard -->|"yes"| answer["Prose + evidence + normalized query"]
+    guard -->|"no/provider failure"| fallback["Deterministic local narration<br/>+ unchanged evidence"]
 ```
 
-- **Constrained query DSL, not text-to-SQL.** The LLM outputs a typed JSON spec (allowed metrics, dimensions, filters, time grains, comparisons). A validator rejects anything referencing unknown fields or unsafe operations. A query builder turns the spec into parameterized SQL. **No model-authored SQL ever runs.** This kills injection, hallucinated columns, and silent wrong math in one move.
-- **Tool-using agent.** The ask service exposes a small, closed tool set: `run_query(spec)`, `get_timeseries(...)`, `list_anomalies(...)`, `describe_schema()`. The agent may only call these. Every figure in the final answer maps to a tool result — and the UI shows that result (table/chart) beside the prose, so answers are auditable.
-- **Ambiguity → clarify, not guess.** "Last quarter" with mixed currencies → the spec makes the base-currency and period explicit, or the agent asks.
-- **Everything the ask-layer can answer, the dashboard could show** — it's the same executor underneath. The NL bar is a fast path, not a separate truth.
+- **A versioned closed DSL, not text-to-SQL.** `AskPlanV1` returns `execute`,
+  `clarify`, or `unsupported`. An execute plan contains one to three strict
+  aggregate, seasonality, recurring, finding, FX, or transaction-evidence
+  queries. Unknown fields, extra keys, unsafe operations, and unsupported
+  dimension intersections fail closed. No model-authored SQL ever runs.
+- **One bounded orchestration pass, not an agent loop.** The planner gets the
+  question, current local date and timezone, explicit scope/home currency, a
+  static catalog, and at most three prior questions/validated plans. It gets no
+  schema, SQL, rows, results, entity catalog, or tool that can explore them.
+- **Local resolution and deterministic execution.** Symbolic dates and exact
+  entity names resolve locally. Code-owned enum branches compile to SQL while
+  every date, identifier, term, and scope remains a bound parameter. All
+  queries execute in one repeatable-read, read-only transaction pinned to one
+  matching analytics generation and home currency.
+- **Bounded evidence.** Table queries return at most 20 rows and monthly series
+  at most 120 points with explicit truncation. Mutable source/entity rows cannot
+  reconstruct an older generation, so transaction, statement, account,
+  category, or merchant changes after the published source watermark return
+  `analytics_rebuilding` before planning or execution. Each
+  analytics snapshot also records its exact FX-rate `fetched_at` watermark in
+  existing run-result metadata, so FX reads use the rates visible to that
+  snapshot and refuse a stale generation after later rate mutation. Timestamp
+  cutoffs retain PostgreSQL microsecond precision. All numeric results remain
+  exact decimal strings from PostgreSQL.
+- **Opaque-reference narration.** Every database-derived value, date, label,
+  relationship, identifier, and factual clause becomes a request-local opaque
+  reference. Narration is a segment tree of connective text and known
+  references. Unknown references, quantitative literals, currency/percentage
+  syntax, malformed output, refusal, or timeout uses deterministic local prose
+  while retaining the evidence.
+- **Ambiguity clarifies, never guesses.** Missing/ambiguous exact entity matches
+  return at most five locally generated choices. Local choices carry opaque
+  tokens that are revalidated inside the read-only snapshot; their labels are
+  never appended to a planner question. Account/scope conflicts clarify. A
+  question may override market but never switches the ledger's home currency.
+- **Unsupported intent is code-owned.** Clear raw-SQL, write, forecast, advice,
+  balance, and net-worth requests return unsupported without trusting provider
+  classification or opening a database snapshot.
+- **No conversation store.** Only the browser tab may retain three prior
+  questions and validated plans. Reload, reset, market change, and home-currency
+  change clear them. Answers, evidence, prompts, and prose are neither persisted
+  nor logged.
+- **Everything Ask can answer is deterministic underneath.** The NL workflow is
+  an auditable fast path over the canonical ledger and materialized Insights,
+  not a parallel financial truth.
+
+ADR-0009 supersedes the earlier iterative tool-using-agent, `describe_schema`,
+raw-result narration, and prompt/result-caching sketch. ADR-0010 refines its
+freshness, clarification, and prohibited-intent enforcement behavior.
 
 ---
 
@@ -700,24 +759,28 @@ things." If a row could be deterministic, it is.
 | **PDF extraction (irregular layout only)** | Deferred to Phase 4 | capable, vision | parser fallback | raw file retained |
 | Merchant categorization — head (known) | **Deterministic** | — | every txn | rule map |
 | **Merchant categorization — unknown tail** | AI | cheap (Haiku-class) | once per new merchant | **persisted as rule** |
-| **NL question → query spec (Phase 3)** | AI | capable | per question | prompt-cached |
+| **NL question → `AskPlanV1` (Phase 3)** | AI | capable | at most once per request | no |
 | **Result narration (Phase 3)** | AI | cheap | per question | — |
 | Insight summaries (later phase) | AI | cheap | on demand | — |
 
-**Cost posture:** current recurring AI cost is limited to novel categorization
-work; unknown-format mapping runs once per validated fingerprint. Bulk ingestion
-of a known bank costs zero AI. Interactive-question cost begins only if the
-Phase 3 ask layer is built.
+**Cost posture:** worker AI cost remains limited to novel categorization and
+unknown-format mapping. Bulk ingestion of a known bank costs zero AI. Each
+enabled Ask request makes at most one capable planning call and, only after
+successful deterministic execution, at most one cheap narration call. There
+are no automatic model retries.
 
-**Data-to-AI boundary (privacy):** the model sees only redacted headers
-plus at most five sample rows for a new tabular format, or the minimized
-merchant proposal payload described above. Account-like identifiers are masked.
-Full statements, raw balances, PDFs, analytics histories, and finding evidence
-are not sent in Phase 2.
+**Data-to-AI boundary (privacy):** worker models see only redacted headers plus
+at most five sample rows for a new tabular format, or the minimized merchant
+proposal payload described above. Ask planning receives only the question,
+local date/timezone, explicit scope/home currency, static catalog, and prior
+questions/validated plans. Ask narration receives only request-local opaque
+fact references. Account-like identifiers are masked. Full statements, raw
+balances, PDFs, schemas, SQL, entity catalogs, database rows, analytics
+histories, raw evidence, and finding calculations are not sent.
 
 ---
 
-## 11. Phase 2 API surface
+## 11. Phase 3 API surface
 
 REST/JSON with shared TypeScript/Zod contracts and explicitly mirrored Python
 Pydantic models where worker results cross the boundary. All money values are
@@ -758,6 +821,8 @@ PATCH  /api/insights/findings/:id
 GET    /api/insights/settings
 PATCH  /api/insights/settings
 POST   /api/insights/rebuild
+GET    /api/ask/status
+POST   /api/ask
 ```
 
 Account, transaction, ordinary analytics, FX, and every Insights read accept an
@@ -769,8 +834,19 @@ account meaning. All money remains exact decimal strings.
 
 Transaction, job, recurring, and finding query schemas validate URL-backed
 date, account, category, merchant, type/status, severity, sort, and pagination
-parameters as applicable. A future `/api/ask` surface belongs to Phase 3 and is
-not part of the Phase 2 server.
+parameters as applicable.
+
+`GET /api/ask/status` reports only `{ enabled, available, reason }`.
+`POST /api/ask` validates a 1–500 character question, explicit `ALL|CA|TZ` market,
+IANA timezone, and at most three prior question/validated-plan pairs. Successful
+dispositions are `answered`, `clarification_required`, `unsupported`, and
+`no_data`. Operational errors are `invalid_request`, `ask_busy`,
+`ask_planning_failed`, `ask_disabled`, `ask_provider_unavailable`,
+`analytics_rebuilding`, and `ask_timeout` with the HTTP statuses fixed in the
+Phase 3 build plan. Answer responses include the normalized plan and resolved
+ranges, exact-decimal evidence, display hints, generation/currency/policy
+identity, source watermark, coverage, truncation, and freshness state. They
+never include SQL, prompts, secrets, model identifiers, or provider payloads.
 
 ---
 
@@ -779,10 +855,10 @@ not part of the Phase 2 server.
 - **SvelteKit PWA** — installable on iOS/Android/desktop from one codebase. The
   shared shell carries All/Canada/Tanzania scope. Desktop keeps direct feature
   links; mobile is Home, Activity, Insights, More.
-- **Insights workflow:** `/insights` contains Overview, Trends, Recurring,
-  Findings, and FX tabs with filters, calculation evidence, review actions, and
-  complete/partial coverage. Home is limited to scoped reporting net worth,
-  native account balances, and recent posted activity.
+- **Insights workflow:** `/insights` contains Ask first/default, then Overview,
+  Trends, Recurring, Findings, and FX, with filters, calculation evidence,
+  review actions, and complete/partial coverage. Home is limited to scoped
+  reporting net worth, native account balances, and recent posted activity.
 - **Progressive transaction disclosure:** Activity shows one account-posted
   amount plus `FX`, `Converted`, and/or `Pending`. A responsive accessible
   drawer exposes original/posted/reporting money, rates, fees, markup, and both
@@ -793,9 +869,12 @@ not part of the Phase 2 server.
   Other page navigations, accounts, FX, transactions, categories, imports,
   jobs, and every write are also uncached by the service worker.
 - **Charts:** **uPlot** for the running-balance and dense time-series (fast on mobile, tiny); **ECharts** for category/treemap/heatmap/comparison views. Deliberately not a single heavyweight React chart lib.
-- **Ask bar (Phase 3):** if built, it should return prose plus its source
-  table/chart and a query-inspection affordance; it is not a Phase 2 client
-  element.
+- **Ask (Phase 3):** the first/default Insights tab loads status independently,
+  discloses the external-provider boundary, and returns structured prose beside
+  source cards/tables/charts and drill-down links. Query inspection shows only
+  the normalized DSL and resolved ranges. At most three prior questions/plans
+  live in browser-tab memory and clear on reload, reset, market change, or
+  home-currency change.
 - **Responsive-first**, keyboard-accessible, respects reduced-motion.
 
 ---
@@ -804,7 +883,7 @@ not part of the Phase 2 server.
 
 Financial data — treat it like it matters, even single-user.
 
-- **Authentication boundary:** Phase 2 has no authentication and must be treated
+- **Authentication boundary:** Phase 3 has no authentication and must be treated
   as a local single-user service. Passkeys/WebAuthn and multi-user authorization
   are later deployment work, not current controls.
 - **Encryption:** raw statement files are encrypted in the application before
@@ -818,12 +897,18 @@ Financial data — treat it like it matters, even single-user.
   validation and migration `011` require a masked label plus a 2–6 digit suffix;
   full/formatted account or card numbers are rejected. Never place references in
   URLs or query strings. Resource UUIDs may appear in API paths.
-- **Least-privilege AI:** per §10, the current product sends only minimized
-  categorization payloads or redacted tabular samples. PDF content is never
-  sent. The named I&M adapter runs Tesseract inside the worker environment;
-  general PDF vision or OCR fallback remains later work.
+- **Least-privilege AI:** per §10, worker models receive only minimized
+  categorization payloads or redacted tabular samples. Ask planning receives
+  no database structure or contents, and narration receives only opaque fact
+  references. PDF content is never sent. The named I&M adapter runs Tesseract
+  inside the worker environment; general PDF vision or OCR fallback remains
+  later work.
+- **Ask retention and logging:** questions, plans, evidence, results, prose, and
+  conversation state are not persisted or logged. Responses are no-store and
+  excluded from service-worker caching. Logs contain only request identity,
+  disposition, model tier, durations, query count, and error code.
 - **Secrets** in a manager (not env files in the repo); rotate provider keys.
-- **Tenant isolation:** Phase 2 has no user/tenant table or row-level security.
+- **Tenant isolation:** Phase 3 has no user/tenant table or row-level security.
   Those must be designed together with authentication before multi-user use.
 - **Auditability:** every derived number traces to source rows; categorization
   proposals retain provider/model, opaque request identity, validated assignment,
@@ -865,21 +950,22 @@ FX-fee analytics, CAD/USD/TZS accounts, account/limit management, deterministic
 net worth, category taxonomy, learned mappings, and user overrides. The client
 is split into Dashboard, Transactions, Accounts, Categories, and Imports.
 
-**Phase 2 — Three-layer money + analytics depth (in review).**
+**Phase 2 — Three-layer money + analytics depth (completed 2026-07-25).**
 Original/posted/reporting provenance, deferred FX, explicit market scopes,
 valuation, supplied I&M Tanzania TZS acceptance, materialized trends and
 seasonality, recurring/renewal/price-hike detection, anomaly/data-quality
 findings, durable review state, and the Insights workflow. A named USD
 institution adapter is deferred by ADR-0006.
 
-**Phase 2.1 — Configurable home currency (implementation present; approval
-gated).** Stable CAD/TZS reporting rebuilt from immutable native money,
+**Phase 2.1 — Configurable home currency (completed separately 2026-07-25).**
+Stable CAD/TZS reporting rebuilt from immutable native money,
 currency-fenced analytics publication, frozen materiality profiles, maintenance
 state, and immutable switch evidence under ADR-0008.
 
-**Phase 3 — Ask it things.**
-Query DSL + validator + executor, the tool-using agent, narration, the ask-bar
-UI with grounded results.
+**Phase 3 — Grounded Ask (in progress).**
+Versioned query DSL, bounded planner, strict validator, deterministic read-only
+executor, opaque-reference narration, local fallback, and an auditable Ask tab
+with no persistent conversation state.
 
 **Phase 4 — Ingestion hardening + polish.**
 General PDF extraction (deterministic + governed fallback + local-model option),
@@ -887,7 +973,7 @@ forecasts, offline hardening, and deployment polish.
 
 ---
 
-## 16. Resolved Phase 2 decisions
+## 16. Resolved decisions through Phase 3
 
 1. Keep the Python worker plus SvelteKit web/API split.
 2. Keep the self-hosted Docker Compose path and single-user product boundary.
@@ -903,10 +989,14 @@ forecasts, offline hardening, and deployment polish.
    only through the ADR-0008 maintenance workflow.
 9. Materialize analytics deterministically and preserve recurring corrections
    and finding review states across atomic refreshes per ADR-0005.
-10. Keep forecasting in Phase 4, natural-language querying in Phase 3, and all
-    Phase 2 findings in-app only.
+10. Keep forecasting in Phase 4 and all findings in-app only; Phase 3 Ask may
+    read bounded finding evidence but cannot create, mutate, or persist it.
 11. Keep one repository/product/engine and model market membership, market
     profile, and home currency as independent concepts per ADR-0007.
+12. Implement Ask as a maximum of one planning call, one deterministic
+    transaction containing one to three queries, and one opaque-reference
+    narration call; do not expose schemas/results to models or persist Ask
+    content, per ADR-0009.
 
 ---
 
