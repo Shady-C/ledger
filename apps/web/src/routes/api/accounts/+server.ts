@@ -1,10 +1,10 @@
 import { json } from '@sveltejs/kit';
-import { accountCreateSchema } from '@ledger/shared-types';
+import { accountCreateSchema, optionalMarketQuerySchema } from '@ledger/shared-types';
 
 import { apiError, privateReadHeaders, unavailableOrInternal, validationError } from '$lib/server/api.js';
 import {
   buildAccountsSummaryQuery,
-  creditUtilizationSummarySql,
+  buildCreditUtilizationSummaryQuery,
   getPool,
   query
 } from '$lib/server/db.js';
@@ -29,13 +29,16 @@ type CreditUtilizationRow = {
   }>;
 };
 
-export async function GET() {
+export async function GET({ url }) {
+  const market = optionalMarketQuerySchema.safeParse(url.searchParams.get('market'));
+  if (!market.success) return validationError(market.error);
   const client = await getPool().connect();
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const built = buildAccountsSummaryQuery();
+    const built = buildAccountsSummaryQuery(undefined, market.data);
+    const utilizationBuilt = buildCreditUtilizationSummaryQuery(market.data);
     const result = await client.query<AccountSummaryRow>(built.text, built.values);
-    const utilizationResult = await client.query<CreditUtilizationRow>(creditUtilizationSummarySql);
+    const utilizationResult = await client.query<CreditUtilizationRow>(utilizationBuilt.text, utilizationBuilt.values);
     const utilization = utilizationResult.rows[0];
     if (!utilization) throw new Error('Credit utilization summary could not be read');
     await client.query('COMMIT');
@@ -75,15 +78,17 @@ export async function POST({ request }) {
 
   try {
     const inserted = await query<{ id: string }>(
-      `INSERT INTO account (
-         institution_id, display_name, kind, native_currency, account_ref_masked, credit_limit
-       ) VALUES ($1::uuid, $2, $3, $4, $5, $6::numeric)
+       `INSERT INTO account (
+         institution_id, display_name, kind, native_currency, market_code,
+         account_ref_masked, credit_limit
+       ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::numeric)
        RETURNING id::text`,
       [
         parsed.data.institutionId ?? null,
         parsed.data.displayName,
         parsed.data.kind,
         parsed.data.nativeCurrency,
+        parsed.data.marketCode,
         parsed.data.accountRefMasked ?? null,
         parsed.data.creditLimit ?? null
       ]

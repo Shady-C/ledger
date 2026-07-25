@@ -62,6 +62,8 @@ describe('mapJobResult', () => {
       mapJobResult('analytics_refresh', 'done', {
         generation: 4,
         mode: 'incremental',
+        base_currency: 'CAD',
+        threshold_policy_version: 'cad-v1',
         source_watermark: '2026-07-24T10:00:00.123456+00:00',
         aggregate_count: 18,
         recurring_series_count: 3,
@@ -72,12 +74,32 @@ describe('mapJobResult', () => {
     ).toEqual({
       generation: 4,
       mode: 'incremental',
+      baseCurrency: 'CAD',
+      thresholdPolicyVersion: 'cad-v1',
       sourceWatermark: '2026-07-24T10:00:00.123456+00:00',
       aggregateCount: 18,
       recurringSeriesCount: 3,
       findingCount: 2,
       durationMs: 45,
       affectedPeriods: ['2026-07-01']
+    });
+  });
+
+  it('exposes pending target-rate recovery after a completed currency switch', () => {
+    expect(
+      mapJobResult('base_currency_rebuild', 'done', {
+        previous_base_currency: 'CAD',
+        target_base_currency: 'TZS',
+        transactions_updated: 12,
+        settings_updated: true,
+        pending_rate_count: 3
+      })
+    ).toEqual({
+      previousBaseCurrency: 'CAD',
+      targetBaseCurrency: 'TZS',
+      transactionsUpdated: 12,
+      settingsUpdated: true,
+      pendingRateCount: 3
     });
   });
 

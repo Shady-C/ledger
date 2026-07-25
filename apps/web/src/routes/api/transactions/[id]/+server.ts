@@ -1,14 +1,33 @@
 import { json } from '@sveltejs/kit';
 import {
+  optionalMarketQuerySchema,
   transactionCategoryPatchSchema,
   uuidSchema,
   type CategoryKind,
+  type TransactionQuery,
   type TransactionFlowType
 } from '@ledger/shared-types';
+import type { PoolClient } from 'pg';
 
-import { apiError, unavailableOrInternal, validationError } from '$lib/server/api.js';
-import { getPool, transactionFlowSql } from '$lib/server/db.js';
+import { apiError, privateReadHeaders, unavailableOrInternal, validationError } from '$lib/server/api.js';
+import { buildFxAnalyticsQuery, buildTransactionQueries, getPool, transactionFlowSql } from '$lib/server/db.js';
 import { enqueueAnalyticsRefresh } from '$lib/server/insights.js';
+import {
+  mapTransactionRow,
+  transactionExplicitFeeEvidence,
+  type TransactionRow
+} from '$lib/server/transactions.js';
+
+type FxDetailRow = {
+  bank_applied_rate: string | null;
+  market_rate: string | null;
+  market_rate_date: string | null;
+  market_rate_source: string | null;
+  explicit_fee_native: string;
+  explicit_fee_base: string | null;
+  estimated_markup_native: string | null;
+  estimated_markup_base: string | null;
+};
 
 type TransactionForCategory = {
   id: string;
@@ -23,6 +42,76 @@ const expectedCategoryKind: Record<TransactionFlowType, CategoryKind> = {
   refund: 'transfer',
   fee: 'fee'
 };
+
+export async function GET({ params, url }) {
+  const id = uuidSchema.safeParse(params.id);
+  if (!id.success) return apiError(400, 'invalid_transaction', 'The transaction id is invalid.');
+  const market = optionalMarketQuerySchema.safeParse(url.searchParams.get('market'));
+  if (!market.success) return validationError(market.error);
+
+  const spec: TransactionQuery = {
+    sort: 'booked_date_desc',
+    page: 1,
+    pageSize: 1,
+    ...(market.data ? { market: market.data } : {})
+  };
+  const transactionQuery = buildTransactionQueries(spec, id.data).data;
+  const fxQuery = buildFxAnalyticsQuery(
+    market.data ? { market: market.data } : {},
+    id.data
+  );
+  let client: PoolClient | undefined;
+  try {
+    client = await getPool().connect();
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const [transactionResult, fxResult] = await Promise.all([
+      client.query<TransactionRow>(transactionQuery.text, transactionQuery.values),
+      client.query<FxDetailRow>(fxQuery.text, fxQuery.values)
+    ]);
+    const row = transactionResult.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return apiError(404, 'transaction_not_found', 'That transaction was not found.');
+    }
+    await client.query('COMMIT');
+    const transaction = mapTransactionRow(row);
+    const fx = fxResult.rows[0];
+    const explicitFee = transactionExplicitFeeEvidence(row, fx);
+    return json(
+      {
+        transaction,
+        conversionEvidence: {
+          indicators: transaction.conversionIndicators,
+          valuationStatus: transaction.valuationStatus,
+          original: transaction.originalAmount !== null && transaction.originalCurrency !== null
+            ? { amount: transaction.originalAmount, currency: transaction.originalCurrency }
+            : null,
+          posted: { amount: transaction.amountNative, currency: transaction.currencyNative },
+          reporting: transaction.amountBase !== null
+            ? { amount: transaction.amountBase, currency: transaction.currencyBase }
+            : null,
+          reportingRate: transaction.fxRate,
+          reportingRateDate: transaction.fxRateDate,
+          bankAppliedRate: fx?.bank_applied_rate ?? null,
+          referenceRate: fx?.market_rate ?? null,
+          referenceRateDate: fx?.market_rate_date ?? null,
+          referenceRateSource: fx?.market_rate_source ?? null,
+          ...explicitFee,
+          estimatedMarkupNative: fx?.estimated_markup_native ?? null,
+          estimatedMarkupBase: fx?.estimated_markup_base ?? null,
+          runningBalanceNative: row.running_balance_native,
+          runningBalanceBase: row.running_balance_base
+        }
+      },
+      { headers: privateReadHeaders }
+    );
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => undefined);
+    return unavailableOrInternal(error, 'transaction detail');
+  } finally {
+    client?.release();
+  }
+}
 
 export async function PATCH({ params, request }) {
   const id = uuidSchema.safeParse(params.id);

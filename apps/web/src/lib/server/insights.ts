@@ -16,10 +16,11 @@ import type {
   InsightSummaryResponse,
   InsightTrendsQuery,
   InsightTrendsResponse,
+  MarketCode,
   RecurringPatch,
   RecurringSeries
 } from '@ledger/shared-types';
-import type { PoolClient } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 
 import { getPool, query } from './db.js';
 
@@ -28,6 +29,7 @@ type EntityFilters = {
   accountId?: string;
   categoryId?: string;
   merchantId?: string;
+  market?: MarketCode;
 };
 type ResolvedRange = { from: string; to: string };
 
@@ -70,12 +72,73 @@ type AnalyticsRunRow = {
   id: string;
   mode: 'full' | 'incremental';
   status: 'queued' | 'running' | 'succeeded' | 'failed';
+  base_currency: string;
+  threshold_policy_version: string;
   source_watermark: Date | string | null;
   result: Record<string, unknown> | null;
   error: string | null;
   started_at: Date | string | null;
   finished_at: Date | string | null;
 };
+
+type AnalyticsContextRow = {
+  active_currency: string;
+  published_currency: string | null;
+  threshold_policy_version: string | null;
+};
+
+export class AnalyticsRebuildingError extends Error {
+  constructor() {
+    super('Insights are rebuilding for the active home currency.');
+    this.name = 'AnalyticsRebuildingError';
+  }
+}
+
+async function runQuery<T extends QueryResultRow>(
+  client: PoolClient | undefined,
+  text: string,
+  values: readonly unknown[] = []
+) {
+  return client ? client.query<T>(text, [...values]) : query<T>(text, values);
+}
+
+async function withAnalyticsSnapshot<T>(operation: (client: PoolClient) => Promise<T>) {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const result = await operation(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readAnalyticsContext(client?: PoolClient) {
+  const result = await runQuery<AnalyticsContextRow>(
+    client,
+    `SELECT
+       ledger.base_currency AS active_currency,
+       run.base_currency AS published_currency,
+       run.threshold_policy_version
+     FROM ledger_settings ledger
+     LEFT JOIN analytics_settings settings ON settings.singleton
+     LEFT JOIN analytics_run run ON run.generation = settings.published_generation
+     WHERE ledger.singleton`
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error('Ledger settings row is missing');
+  if (!row.published_currency || row.published_currency !== row.active_currency) {
+    throw new AnalyticsRebuildingError();
+  }
+  return {
+    baseCurrency: row.active_currency,
+    thresholdPolicyVersion: row.threshold_policy_version ?? 'v1'
+  };
+}
 
 type TrendRow = {
   period: string;
@@ -215,6 +278,8 @@ function mapAnalyticsRun(row: AnalyticsRunRow | undefined): AnalyticsRun | null 
     id: row.id,
     status: row.status,
     mode: row.mode,
+    baseCurrency: row.base_currency,
+    thresholdPolicyVersion: row.threshold_policy_version,
     sourceWatermark: timestamp(row.source_watermark)
       ?? stringFrom(row.result, 'sourceWatermark', 'source_watermark'),
     affectedPeriodCount: Array.isArray(affectedPeriods) ? affectedPeriods.length : 0,
@@ -228,17 +293,42 @@ function mapAnalyticsRun(row: AnalyticsRunRow | undefined): AnalyticsRun | null 
   };
 }
 
+const activePublishedGenerationSql = `(
+  SELECT settings.published_generation
+  FROM analytics_settings settings
+  JOIN analytics_run published
+    ON published.generation = settings.published_generation
+  JOIN ledger_settings ledger ON ledger.singleton
+  WHERE settings.singleton
+    AND published.status = 'succeeded'
+    AND published.base_currency = ledger.base_currency
+)`;
+
+function liveAccountMarketPredicate(accountValue: string, marketValue: string) {
+  return `EXISTS (
+    SELECT 1 FROM account live_scoped_account
+    WHERE live_scoped_account.id = ${accountValue}::uuid
+      AND live_scoped_account.market_code = ${marketValue}
+  )`;
+}
+
 function aggregateEntityClause(filters: EntityFilters, values: unknown[], alias = 'aggregate') {
+  const marketValue = addValue(values, filters.market ?? 'ALL');
+  const scope = `${alias}.market_scope = ${marketValue}`;
   if (filters.accountId) {
-    return `${alias}.dimension_type = 'account' AND ${alias}.account_id = ${addValue(values, filters.accountId)}::uuid`;
+    const accountValue = addValue(values, filters.accountId);
+    const compatibility = filters.market
+      ? ` AND ${liveAccountMarketPredicate(accountValue, marketValue)}`
+      : '';
+    return `${scope} AND ${alias}.dimension_type = 'account' AND ${alias}.account_id = ${accountValue}::uuid${compatibility}`;
   }
   if (filters.categoryId) {
-    return `${alias}.dimension_type = 'category' AND ${alias}.category_id = ${addValue(values, filters.categoryId)}::uuid`;
+    return `${scope} AND ${alias}.dimension_type = 'category' AND ${alias}.category_id = ${addValue(values, filters.categoryId)}::uuid`;
   }
   if (filters.merchantId) {
-    return `${alias}.dimension_type = 'merchant' AND ${alias}.merchant_id = ${addValue(values, filters.merchantId)}::uuid`;
+    return `${scope} AND ${alias}.dimension_type = 'merchant' AND ${alias}.merchant_id = ${addValue(values, filters.merchantId)}::uuid`;
   }
-  return `${alias}.dimension_type = 'ledger'`;
+  return `${scope} AND ${alias}.dimension_type = 'ledger'`;
 }
 
 function effectiveDimension(spec: InsightTrendsQuery): InsightDimension {
@@ -253,11 +343,19 @@ function transactionEntityClauses(filters: EntityFilters, values: unknown[], ali
   if (filters.accountId) clauses.push(`${alias}.account_id = ${addValue(values, filters.accountId)}::uuid`);
   if (filters.categoryId) clauses.push(`${alias}.category_id = ${addValue(values, filters.categoryId)}::uuid`);
   if (filters.merchantId) clauses.push(`${alias}.merchant_id = ${addValue(values, filters.merchantId)}::uuid`);
+  if (filters.market) {
+    clauses.push(`EXISTS (
+      SELECT 1 FROM account scoped_account
+      WHERE scoped_account.id = ${alias}.account_id
+        AND scoped_account.market_code = ${addValue(values, filters.market)}
+    )`);
+  }
   return clauses;
 }
 
 export async function resolveInsightRange(
-  spec: { range: '3m' | '6m' | '12m' | '24m' | 'all'; from?: string; to?: string } & EntityFilters
+  spec: { range: '3m' | '6m' | '12m' | '24m' | 'all'; from?: string; to?: string } & EntityFilters,
+  client?: PoolClient
 ): Promise<ResolvedRange> {
   const to = spec.to ?? today();
   if (spec.from) return { from: spec.from, to };
@@ -267,7 +365,8 @@ export async function resolveInsightRange(
   }
   const values: unknown[] = [];
   const clauses = transactionEntityClauses(spec, values, 'txn');
-  const result = await query<{ from_date: string }>(
+  const result = await runQuery<{ from_date: string }>(
+    client,
     `SELECT COALESCE(MIN(txn.booked_date), $${values.length + 1}::date)::text AS from_date
      FROM txn
      ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}`,
@@ -326,9 +425,13 @@ function parseJsonArray(value: unknown): unknown[] {
   return [];
 }
 
-async function readCoverage(filters: EntityFilters, range: ResolvedRange): Promise<InsightCoverage> {
+async function readCoverage(
+  filters: EntityFilters,
+  range: ResolvedRange,
+  client?: PoolClient
+): Promise<InsightCoverage> {
   const built = buildCoverageQuery(filters, range);
-  const result = await query<CoverageRow>(built.text, built.values);
+  const result = await runQuery<CoverageRow>(client, built.text, built.values);
   const row = result.rows[0];
   const unvaluedByCurrency = parseJsonArray(row?.unvalued_by_currency).flatMap((value) => {
     if (!value || typeof value !== 'object') return [];
@@ -404,6 +507,8 @@ function recurringFilterClauses(filters: EntityFilters, range: ResolvedRange, va
     `occurrence.series_id = series.id`,
     `occurrence.occurrence_date BETWEEN ${from} AND ${to}`
   ];
+  const scope = addValue(values, filters.market ?? 'ALL');
+  let liveAccountCompatibility = '';
   if (filters.accountId) {
     const account = addValue(values, filters.accountId);
     occurrenceClauses.push(`EXISTS (
@@ -411,6 +516,10 @@ function recurringFilterClauses(filters: EntityFilters, range: ResolvedRange, va
       WHERE filtered_transaction.id = occurrence.transaction_id
         AND filtered_transaction.account_id = ${account}::uuid
     )`);
+    if (filters.market) {
+      liveAccountCompatibility = `
+    AND ${liveAccountMarketPredicate(account, scope)}`;
+    }
   }
   if (filters.categoryId) {
     const category = addValue(values, filters.categoryId);
@@ -424,13 +533,22 @@ function recurringFilterClauses(filters: EntityFilters, range: ResolvedRange, va
     const merchant = addValue(values, filters.merchantId);
     occurrenceClauses.push(`series.merchant_id = ${merchant}::uuid`);
   }
-  return `EXISTS (SELECT 1 FROM recurring_occurrence occurrence WHERE ${occurrenceClauses.join(' AND ')})`;
+  return `series.market_scope = ${scope}
+    AND series.last_detected_generation = ${activePublishedGenerationSql}
+    ${liveAccountCompatibility}
+    AND EXISTS (SELECT 1 FROM recurring_occurrence occurrence WHERE ${occurrenceClauses.join(' AND ')})`;
 }
 
-async function readRecurringSummary(filters: EntityFilters, range: ResolvedRange) {
+async function readRecurringSummary(
+  filters: EntityFilters,
+  range: ResolvedRange,
+  baseCurrency: string,
+  client?: PoolClient
+) {
   const values: unknown[] = [];
   const filter = recurringFilterClauses(filters, range, values);
-  const result = await query<RecurringSummaryRow>(
+  const result = await runQuery<RecurringSummaryRow>(
+    client,
     `SELECT
        (COUNT(*) FILTER (WHERE series.status IN ('detected', 'confirmed')))::int AS active_series,
        (COUNT(*) FILTER (
@@ -447,7 +565,7 @@ async function readRecurringSummary(filters: EntityFilters, range: ResolvedRange
          END
        ) FILTER (
          WHERE series.status IN ('detected', 'confirmed')
-           AND series.comparison_currency = 'CAD'
+           AND series.comparison_currency = ${addValue(values, baseCurrency)}
        ), 2), 0)::text AS expected_monthly_amount
      FROM recurring_series series
      WHERE ${filter}`,
@@ -494,9 +612,17 @@ const findingEventDate = `COALESCE(
 )`;
 
 function findingEntityClauses(filters: EntityFilters, values: unknown[]) {
-  const clauses: string[] = [];
+  const marketValue = addValue(values, filters.market ?? 'ALL');
+  const clauses: string[] = [
+    `finding.market_scope = ${marketValue}`,
+    `finding.last_detected_generation = ${activePublishedGenerationSql}`
+  ];
   if (filters.accountId) {
-    clauses.push(`COALESCE(finding.account_id, ledger_txn.account_id) = ${addValue(values, filters.accountId)}::uuid`);
+    const accountValue = addValue(values, filters.accountId);
+    clauses.push(`COALESCE(finding.account_id, ledger_txn.account_id) = ${accountValue}::uuid`);
+    if (filters.market) {
+      clauses.push(liveAccountMarketPredicate(accountValue, marketValue));
+    }
   }
   if (filters.categoryId) {
     clauses.push(`${findingCategoryId} = ${addValue(values, filters.categoryId)}::uuid`);
@@ -507,12 +633,13 @@ function findingEntityClauses(filters: EntityFilters, values: unknown[]) {
   return clauses;
 }
 
-async function readFindingCounts(filters: EntityFilters, range: ResolvedRange) {
+async function readFindingCounts(filters: EntityFilters, range: ResolvedRange, client?: PoolClient) {
   const values: unknown[] = [];
   const from = addValue(values, range.from, '::date');
   const to = addValue(values, range.to, '::date');
   const entity = findingEntityClauses(filters, values);
-  const result = await query<FindingCountsRow>(
+  const result = await runQuery<FindingCountsRow>(
+    client,
     `SELECT
        (COUNT(*) FILTER (WHERE finding.status = 'new'))::int AS new_count,
        (COUNT(*) FILTER (WHERE finding.status = 'confirmed'))::int AS confirmed_count,
@@ -528,12 +655,16 @@ async function readFindingCounts(filters: EntityFilters, range: ResolvedRange) {
   return result.rows[0] ?? { new_count: 0, confirmed_count: 0, dismissed_count: 0, resolved_count: 0 };
 }
 
-async function readLatestRun() {
-  const result = await query<AnalyticsRunRow>(
-    `SELECT id::text, mode, status, source_watermark, result, error, started_at, finished_at
+async function readLatestRun(baseCurrency: string, client?: PoolClient) {
+  const result = await runQuery<AnalyticsRunRow>(
+    client,
+    `SELECT id::text, mode, status, base_currency, threshold_policy_version,
+            source_watermark, result, error, started_at, finished_at
      FROM analytics_run
+     WHERE base_currency = $1
      ORDER BY requested_at DESC, id DESC
-     LIMIT 1`
+     LIMIT 1`,
+    [baseCurrency]
   );
   return mapAnalyticsRun(result.rows[0]);
 }
@@ -554,19 +685,24 @@ function comparison(
   };
 }
 
-export async function readInsightSummary(spec: InsightSummaryQuery): Promise<InsightSummaryResponse> {
-  const range = await resolveInsightRange(spec);
+export async function readInsightSummary(
+  spec: InsightSummaryQuery,
+  client?: PoolClient
+): Promise<InsightSummaryResponse> {
+  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightSummary(spec, snapshot));
+  const context = await readAnalyticsContext(client);
+  const range = await resolveInsightRange(spec, client);
   const built = buildSummaryQuery(spec, range);
   const [summaryResult, coverage, recurring, findings, latestRun] = await Promise.all([
-    query<SummaryRow>(built.text, built.values),
-    readCoverage(spec, range),
-    readRecurringSummary(spec, range),
-    readFindingCounts(spec, range),
-    readLatestRun()
+    runQuery<SummaryRow>(client, built.text, built.values),
+    readCoverage(spec, range, client),
+    readRecurringSummary(spec, range, context.baseCurrency, client),
+    readFindingCounts(spec, range, client),
+    readLatestRun(context.baseCurrency, client)
   ]);
   const row = summaryResult.rows[0];
   return {
-    baseCurrency: 'CAD',
+    baseCurrency: context.baseCurrency,
     range,
     coverage,
     totals: {
@@ -607,9 +743,15 @@ export function buildTrendsQuery(spec: InsightTrendsQuery, range: ResolvedRange)
   if (spec.categoryId) { dimension = 'category'; dimensionId = spec.categoryId; }
   if (spec.merchantId) { dimension = 'merchant'; dimensionId = spec.merchantId; }
   const dimensionValue = addValue(values, dimension);
-  const dimensionFilter = dimensionId
-    ? `AND COALESCE(aggregate.account_id, aggregate.category_id, aggregate.merchant_id) = ${addValue(values, dimensionId)}::uuid`
-    : '';
+  const marketScope = addValue(values, spec.market ?? 'ALL');
+  let dimensionFilter = '';
+  if (dimensionId) {
+    const dimensionIdValue = addValue(values, dimensionId);
+    dimensionFilter = `AND COALESCE(aggregate.account_id, aggregate.category_id, aggregate.merchant_id) = ${dimensionIdValue}::uuid`;
+    if (spec.accountId && spec.market) {
+      dimensionFilter += ` AND ${liveAccountMarketPredicate(dimensionIdValue, marketScope)}`;
+    }
+  }
   return {
     text: `
       SELECT
@@ -657,12 +799,14 @@ export function buildTrendsQuery(spec: InsightTrendsQuery, range: ResolvedRange)
        AND previous_month.account_id IS NOT DISTINCT FROM aggregate.account_id
        AND previous_month.category_id IS NOT DISTINCT FROM aggregate.category_id
        AND previous_month.merchant_id IS NOT DISTINCT FROM aggregate.merchant_id
+       AND previous_month.market_scope = aggregate.market_scope
       LEFT JOIN analytics_monthly_current previous_year
         ON previous_year.period_start = aggregate.period_start - INTERVAL '1 year'
        AND previous_year.dimension_type = aggregate.dimension_type
        AND previous_year.account_id IS NOT DISTINCT FROM aggregate.account_id
        AND previous_year.category_id IS NOT DISTINCT FROM aggregate.category_id
        AND previous_year.merchant_id IS NOT DISTINCT FROM aggregate.merchant_id
+       AND previous_year.market_scope = aggregate.market_scope
       LEFT JOIN LATERAL (
         WITH calendar_month AS (
           SELECT generate_series(
@@ -686,10 +830,12 @@ export function buildTrendsQuery(spec: InsightTrendsQuery, range: ResolvedRange)
          AND history.account_id IS NOT DISTINCT FROM aggregate.account_id
          AND history.category_id IS NOT DISTINCT FROM aggregate.category_id
          AND history.merchant_id IS NOT DISTINCT FROM aggregate.merchant_id
+         AND history.market_scope = aggregate.market_scope
         WHERE history.coverage_status IS NULL OR history.coverage_status = 'complete'
       ) trailing_stats ON true
       WHERE aggregate.period_start BETWEEN ${from} AND ${to}
         AND aggregate.dimension_type = ${dimensionValue}
+        AND aggregate.market_scope = ${marketScope}
         ${dimensionFilter}
       ORDER BY aggregate.period_start, dimension_name, dimension_id NULLS FIRST`,
     values
@@ -700,6 +846,7 @@ export function buildMoversQuery(filters: EntityFilters, range: ResolvedRange): 
   const values: unknown[] = [];
   const from = addValue(values, monthStart(range.from), '::date');
   const to = addValue(values, monthStart(range.to), '::date');
+  const marketScope = addValue(values, filters.market ?? 'ALL');
   let entityClause = 'true';
   if (filters.accountId) entityClause = 'false';
   if (filters.categoryId) {
@@ -714,6 +861,7 @@ export function buildMoversQuery(filters: EntityFilters, range: ResolvedRange): 
         SELECT period_start
         FROM analytics_monthly_current
         WHERE dimension_type = 'ledger'
+          AND market_scope = ${marketScope}
           AND coverage_status = 'complete'
           AND period_start < date_trunc('month', CURRENT_DATE)::date
           AND period_start BETWEEN ${from} AND ${to}
@@ -728,12 +876,14 @@ export function buildMoversQuery(filters: EntityFilters, range: ResolvedRange): 
         FROM analytics_monthly_current aggregate
         JOIN bounds ON bounds.current_period = aggregate.period_start
         WHERE aggregate.dimension_type IN ('category', 'merchant')
+          AND aggregate.market_scope = ${marketScope}
           AND aggregate.coverage_status = 'complete'
       ), previous_rows AS (
         SELECT aggregate.*
         FROM analytics_monthly_current aggregate
         JOIN bounds ON bounds.previous_period = aggregate.period_start
         WHERE aggregate.dimension_type IN ('category', 'merchant')
+          AND aggregate.market_scope = ${marketScope}
           AND aggregate.coverage_status = 'complete'
       ), paired AS (
         SELECT
@@ -769,14 +919,19 @@ export function buildMoversQuery(filters: EntityFilters, range: ResolvedRange): 
   };
 }
 
-export async function readInsightTrends(spec: InsightTrendsQuery): Promise<InsightTrendsResponse> {
-  const range = await resolveInsightRange(spec);
+export async function readInsightTrends(
+  spec: InsightTrendsQuery,
+  client?: PoolClient
+): Promise<InsightTrendsResponse> {
+  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightTrends(spec, snapshot));
+  const context = await readAnalyticsContext(client);
+  const range = await resolveInsightRange(spec, client);
   const built = buildTrendsQuery(spec, range);
   const moversBuilt = buildMoversQuery(spec, range);
   const [result, moversResult, coverage] = await Promise.all([
-    query<TrendRow>(built.text, built.values),
-    query<MoverRow>(moversBuilt.text, moversBuilt.values),
-    readCoverage(spec, range)
+    runQuery<TrendRow>(client, built.text, built.values),
+    runQuery<MoverRow>(client, moversBuilt.text, moversBuilt.values),
+    readCoverage(spec, range, client)
   ]);
   const movers = moversResult.rows.map((row) => ({
     dimensionType: row.dimension_type,
@@ -788,7 +943,7 @@ export async function readInsightTrends(spec: InsightTrendsQuery): Promise<Insig
     changePercent: row.change_percent
   }));
   return {
-    baseCurrency: 'CAD',
+    baseCurrency: context.baseCurrency,
     range,
     groupBy: result.rows[0]?.dimension_type ?? effectiveDimension(spec),
     coverage,
@@ -834,15 +989,21 @@ export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRan
   const from = addValue(values, monthStart(range.from), '::date');
   const to = addValue(values, monthStart(range.to), '::date');
   const entityClause = aggregateEntityClause(filters, values, 'aggregate');
+  const marketScope = addValue(values, filters.market ?? 'ALL');
+  const liveAccountCompatibility = filters.accountId && filters.market
+    ? `AND ${liveAccountMarketPredicate(addValue(values, filters.accountId), marketScope)}`
+    : '';
   return {
     text: `
       WITH eligible_period AS (
         SELECT ledger.period_start
         FROM analytics_monthly_current ledger
         WHERE ledger.dimension_type = 'ledger'
+          AND ledger.market_scope = ${marketScope}
           AND ledger.coverage_status = 'complete'
           AND ledger.period_start < date_trunc('month', CURRENT_DATE)::date
           AND ledger.period_start BETWEEN ${from} AND ${to}
+          ${liveAccountCompatibility}
       )
       SELECT
         EXTRACT(MONTH FROM eligible_period.period_start)::int AS month_number,
@@ -865,18 +1026,21 @@ export function buildSeasonalityQuery(filters: EntityFilters, range: ResolvedRan
 }
 
 export async function readInsightSeasonality(
-  spec: InsightSeasonalityQuery
+  spec: InsightSeasonalityQuery,
+  client?: PoolClient
 ): Promise<InsightSeasonalityResponse> {
-  const range = await resolveInsightRange(spec);
+  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightSeasonality(spec, snapshot));
+  const context = await readAnalyticsContext(client);
+  const range = await resolveInsightRange(spec, client);
   const built = buildSeasonalityQuery(spec, range);
   const [result, coverage] = await Promise.all([
-    query<SeasonalityRow>(built.text, built.values),
-    readCoverage(spec, range)
+    runQuery<SeasonalityRow>(client, built.text, built.values),
+    readCoverage(spec, range, client)
   ]);
   const historyMonths = result.rows.reduce((total, row) => total + Number(row.observation_count), 0);
   const formatter = new Intl.DateTimeFormat('en', { month: 'short', timeZone: 'UTC' });
   return {
-    baseCurrency: 'CAD',
+    baseCurrency: context.baseCurrency,
     range,
     status: historyMonths >= 12 ? 'available' : 'insufficient_history',
     historyMonths,
@@ -1041,17 +1205,20 @@ function mapRecurring(row: RecurringRow): RecurringSeries {
 }
 
 export async function readInsightRecurring(
-  spec: InsightRecurringQuery
+  spec: InsightRecurringQuery,
+  client?: PoolClient
 ): Promise<InsightRecurringResponse> {
-  const range = await resolveInsightRange(spec);
+  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightRecurring(spec, snapshot));
+  const context = await readAnalyticsContext(client);
+  const range = await resolveInsightRange(spec, client);
   const built = buildRecurringQueries(spec, range);
   const [data, count] = await Promise.all([
-    query<RecurringRow>(built.data.text, built.data.values),
-    query<{ total: number }>(built.count.text, built.count.values)
+    runQuery<RecurringRow>(client, built.data.text, built.data.values),
+    runQuery<{ total: number }>(client, built.count.text, built.count.values)
   ]);
   const total = Number(count.rows[0]?.total ?? 0);
   return {
-    baseCurrency: 'CAD',
+    baseCurrency: context.baseCurrency,
     range,
     series: data.rows.map(mapRecurring),
     page: spec.page,
@@ -1062,10 +1229,20 @@ export async function readInsightRecurring(
 }
 
 async function readRecurringById(id: string) {
+  const scopeResult = await query<{ market_scope: 'ALL' | MarketCode }>(
+    `SELECT market_scope
+     FROM recurring_series
+     WHERE id = $1::uuid
+       AND last_detected_generation = ${activePublishedGenerationSql}`,
+    [id]
+  );
+  const scope = scopeResult.rows[0]?.market_scope;
+  if (!scope) return null;
   const spec: InsightRecurringQuery = {
     range: 'all',
     page: 1,
-    pageSize: 100
+    pageSize: 100,
+    ...(scope === 'ALL' ? {} : { market: scope })
   };
   const range = await resolveInsightRange(spec);
   const built = buildRecurringQueries(spec, range, id);
@@ -1073,7 +1250,7 @@ async function readRecurringById(id: string) {
   return result.rows[0] ? mapRecurring(result.rows[0]) : null;
 }
 
-export async function updateRecurringSeries(id: string, patch: RecurringPatch) {
+export function buildRecurringReviewUpdate(id: string, patch: RecurringPatch): BuiltQuery {
   const values: unknown[] = [];
   const updates: string[] = [];
   if (patch.status !== undefined) {
@@ -1087,13 +1264,19 @@ export async function updateRecurringSeries(id: string, patch: RecurringPatch) {
   }
   updates.push('reviewed_at = now()', 'updated_at = now()');
   values.push(id);
-  const result = await query<{ id: string }>(
-    `UPDATE recurring_series
-     SET ${updates.join(', ')}
-     WHERE id = $${values.length}::uuid
-     RETURNING id::text`,
+  return {
+    text: `UPDATE recurring_series
+      SET ${updates.join(', ')}
+      WHERE id = $${values.length}::uuid
+        AND last_detected_generation = ${activePublishedGenerationSql}
+      RETURNING id::text`,
     values
-  );
+  };
+}
+
+export async function updateRecurringSeries(id: string, patch: RecurringPatch) {
+  const built = buildRecurringReviewUpdate(id, patch);
+  const result = await query<{ id: string }>(built.text, built.values);
   if (!result.rows[0]) return null;
   // Recurrence corrections are detector inputs. Refresh findings after the
   // durable override is saved so cancelled/ignored series and amount/cadence
@@ -1176,12 +1359,19 @@ export function buildFindingQueries(spec: InsightFindingsQuery, range: ResolvedR
 }
 
 function evidenceObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  const withoutMigrationMetadata = (evidence: Record<string, unknown>) => {
+    const publicEvidence = { ...evidence };
+    delete publicEvidence._migration014DetectorFingerprint;
+    return publicEvidence;
+  };
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return withoutMigrationMetadata(value as Record<string, unknown>);
+  }
   if (typeof value === 'string') {
     try {
       const parsed: unknown = JSON.parse(value);
       return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
+        ? withoutMigrationMetadata(parsed as Record<string, unknown>)
         : {};
     } catch {
       return {};
@@ -1214,16 +1404,20 @@ function mapFinding(row: FindingRow): InsightFinding {
 }
 
 export async function readInsightFindings(
-  spec: InsightFindingsQuery
+  spec: InsightFindingsQuery,
+  client?: PoolClient
 ): Promise<InsightFindingsResponse> {
-  const range = await resolveInsightRange(spec);
+  if (!client) return withAnalyticsSnapshot((snapshot) => readInsightFindings(spec, snapshot));
+  const context = await readAnalyticsContext(client);
+  const range = await resolveInsightRange(spec, client);
   const built = buildFindingQueries(spec, range);
   const [data, count] = await Promise.all([
-    query<FindingRow>(built.data.text, built.data.values),
-    query<{ total: number }>(built.count.text, built.count.values)
+    runQuery<FindingRow>(client, built.data.text, built.data.values),
+    runQuery<{ total: number }>(client, built.count.text, built.count.values)
   ]);
   const total = Number(count.rows[0]?.total ?? 0);
   return {
+    baseCurrency: context.baseCurrency,
     findings: data.rows.map(mapFinding),
     page: spec.page,
     pageSize: spec.pageSize,
@@ -1264,22 +1458,31 @@ async function readFindingById(id: string) {
        finding.reviewed_at
      FROM insight_finding finding
      ${findingJoins}
-     WHERE finding.id = $1::uuid`,
+     WHERE finding.id = $1::uuid
+       AND finding.last_detected_generation = ${activePublishedGenerationSql}`,
     [id]
   );
   return result.rows[0] ? mapFinding(result.rows[0]) : null;
 }
 
+export function buildFindingReviewUpdate(id: string, patch: InsightFindingPatch): BuiltQuery {
+  return {
+    text: `UPDATE insight_finding
+      SET status = $1,
+          reviewed_at = CASE WHEN $1 IN ('confirmed', 'dismissed') THEN now() ELSE reviewed_at END,
+          resolved_at = CASE WHEN $1 = 'resolved' THEN now() ELSE NULL END,
+          updated_at = now()
+      WHERE id = $2::uuid
+        AND last_detected_generation = ${activePublishedGenerationSql}
+      RETURNING id::text`,
+    values: [patch.status, id]
+  };
+}
+
 export async function updateInsightFinding(id: string, patch: InsightFindingPatch) {
-  await query(
-    `UPDATE insight_finding
-     SET status = $1,
-         reviewed_at = CASE WHEN $1 IN ('confirmed', 'dismissed') THEN now() ELSE reviewed_at END,
-         resolved_at = CASE WHEN $1 = 'resolved' THEN now() ELSE NULL END,
-         updated_at = now()
-     WHERE id = $2::uuid`,
-    [patch.status, id]
-  );
+  const built = buildFindingReviewUpdate(id, patch);
+  const result = await query<{ id: string }>(built.text, built.values);
+  if (!result.rows[0]) return null;
   return readFindingById(id);
 }
 
@@ -1292,59 +1495,79 @@ export async function readInsightSettings(): Promise<InsightSettingsResponse> {
   return { settings: { sensitivity: row.sensitivity, updatedAt: timestamp(row.updated_at)! } };
 }
 
-async function enqueueAnalyticsRefreshInTransaction(
+export async function enqueueAnalyticsRefreshInTransaction(
   client: PoolClient,
   mode: 'full' | 'incremental'
 ) {
-  // Serialize the otherwise-empty active-job lookup so concurrent API writes
-  // cannot race into the partial unique index. The singleton settings row is
-  // also the publication pointer, making it the natural ledger-wide mutex.
+  // Serialize API callers on the singleton settings row. Worker and trigger
+  // producers do not share that mutex, so the partial unique index below still
+  // arbitrates cross-producer races.
   await client.query(
     'SELECT singleton FROM analytics_settings WHERE singleton FOR UPDATE'
   );
-  const active = await client.query<{ id: string; status: 'queued' | 'claimed' }>(
-    `SELECT id::text, status
-     FROM job
-     WHERE kind = 'analytics_refresh'
-       AND status IN ('queued', 'claimed')
-     ORDER BY created_at
-     LIMIT 1
-     FOR UPDATE`
-  );
-  if (active.rows[0]) {
-    await client.query(
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inserted = await client.query<{ id: string; status: 'queued' }>(
+      `INSERT INTO job (kind, payload, status, deduplication_key)
+       VALUES ('analytics_refresh', $1::jsonb, 'queued', 'analytics-refresh:ledger')
+       ON CONFLICT (kind, deduplication_key)
+         WHERE deduplication_key IS NOT NULL
+           AND status IN ('queued', 'claimed')
+       DO NOTHING
+       RETURNING id::text, status`,
+      [JSON.stringify({ mode })]
+    );
+    const accepted = inserted.rows[0];
+    if (accepted) {
+      const run = await client.query<{ id: string }>(
+        `INSERT INTO analytics_run (
+           mode, status, base_currency, threshold_policy_version
+         )
+         SELECT $1, 'queued', ledger.base_currency, profile.policy_version
+         FROM ledger_settings ledger
+         JOIN analytics_threshold_profile profile
+           ON profile.base_currency = ledger.base_currency
+         WHERE ledger.singleton
+         RETURNING id::text`,
+        [mode]
+      );
+      const analyticsRun = run.rows[0];
+      if (!analyticsRun) throw new Error('Analytics run insert did not return a row');
+      const attached = await client.query<{ id: string }>(
+        `UPDATE job
+         SET payload = payload || jsonb_build_object('analytics_run_id', $2::text),
+             updated_at = now()
+         WHERE id = $1::uuid AND status = 'queued'
+         RETURNING id::text`,
+        [accepted.id, analyticsRun.id]
+      );
+      if (!attached.rows[0]) throw new Error('Analytics run could not be attached to its job');
+      return { jobId: accepted.id, kind: 'analytics_refresh' as const, status: accepted.status };
+    }
+
+    const active = await client.query<{ id: string; status: 'queued' | 'claimed' }>(
       `UPDATE job
        SET payload = payload
-         || CASE WHEN $2 = 'full' THEN '{"mode":"full"}'::jsonb ELSE '{}'::jsonb END
+         || CASE WHEN $1 = 'full' THEN '{"mode":"full"}'::jsonb ELSE '{}'::jsonb END
          || '{"rerun_requested":true}'::jsonb,
            updated_at = now()
-       WHERE id = $1::uuid`,
-      [active.rows[0].id, mode]
+       WHERE kind = 'analytics_refresh'
+         AND status IN ('queued', 'claimed')
+       RETURNING id::text, status`,
+      [mode]
     );
-    return {
-      jobId: active.rows[0].id,
-      kind: 'analytics_refresh' as const,
-      status: active.rows[0].status
-    };
+    if (active.rows[0]) {
+      return {
+        jobId: active.rows[0].id,
+        kind: 'analytics_refresh' as const,
+        status: active.rows[0].status
+      };
+    }
+    // The conflicting job completed between our INSERT and UPDATE. Retry so
+    // this request still guarantees that one active refresh exists.
   }
 
-  const run = await client.query<{ id: string }>(
-    `INSERT INTO analytics_run (mode, status)
-     VALUES ($1, 'queued')
-     RETURNING id::text`,
-    [mode]
-  );
-  const analyticsRun = run.rows[0];
-  if (!analyticsRun) throw new Error('Analytics run insert did not return a row');
-  const job = await client.query<{ id: string; status: 'queued' | 'claimed' }>(
-    `INSERT INTO job (kind, payload, status, deduplication_key)
-     VALUES ('analytics_refresh', $1::jsonb, 'queued', 'analytics-refresh:ledger')
-     RETURNING id::text, status`,
-    [JSON.stringify({ mode, analytics_run_id: analyticsRun.id })]
-  );
-  const accepted = job.rows[0];
-  if (!accepted) throw new Error('Analytics job insert did not return a row');
-  return { jobId: accepted.id, kind: 'analytics_refresh' as const, status: accepted.status };
+  throw new Error('Analytics refresh could not be enqueued or coalesced');
 }
 
 export async function updateInsightSettings(patch: InsightSettingsPatch): Promise<InsightSettingsResponse> {

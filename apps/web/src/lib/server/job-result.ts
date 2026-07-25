@@ -89,7 +89,10 @@ export function mapJobResult(
       baseCurrency: parsed.data.base_currency,
       quoteCurrencies: parsed.data.quote_currencies,
       ratesStored: parsed.data.rates_stored,
-      transactionsUpdated: parsed.data.transactions_updated
+      transactionsUpdated: parsed.data.transactions_updated,
+      ...(parsed.data.unavailable_rate_count === undefined
+        ? {}
+        : { unavailableRateCount: parsed.data.unavailable_rate_count })
     };
   }
 
@@ -99,6 +102,8 @@ export function mapJobResult(
     return {
       generation: parsed.data.generation,
       mode: parsed.data.mode,
+      baseCurrency: parsed.data.base_currency,
+      thresholdPolicyVersion: parsed.data.threshold_policy_version,
       sourceWatermark: parsed.data.source_watermark,
       aggregateCount: parsed.data.aggregate_count,
       recurringSeriesCount: parsed.data.recurring_series_count,
@@ -114,6 +119,9 @@ export function mapJobResult(
     previousBaseCurrency: parsed.data.previous_base_currency,
     targetBaseCurrency: parsed.data.target_base_currency,
     transactionsUpdated: parsed.data.transactions_updated,
-    settingsUpdated: parsed.data.settings_updated
+    settingsUpdated: parsed.data.settings_updated,
+    ...(parsed.data.pending_rate_count === undefined
+      ? {}
+      : { pendingRateCount: parsed.data.pending_rate_count })
   };
 }

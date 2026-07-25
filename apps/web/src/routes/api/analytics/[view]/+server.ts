@@ -101,7 +101,7 @@ export async function GET({ params, url }) {
     }
 
     if (view.data === 'net-worth') {
-      const built = buildNetWorthQuery(parsed.data.accountId);
+      const built = buildNetWorthQuery(parsed.data);
       const result = await client.query<NetWorthRow>(built.text, built.values);
       const summary = result.rows[0];
       await client.query('COMMIT');

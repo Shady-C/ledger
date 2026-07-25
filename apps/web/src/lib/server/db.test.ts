@@ -3,8 +3,10 @@ import { analyticsQuerySchema, transactionQuerySchema } from '@ledger/shared-typ
 
 import {
   accountsSummarySql,
+  buildAccountsSummaryQuery,
   buildBalanceQuery,
   buildCashflowQuery,
+  buildCreditUtilizationSummaryQuery,
   buildFxAnalyticsQuery,
   buildNetWorthQuery,
   buildTransactionQueries,
@@ -28,12 +30,23 @@ describe('accountsSummarySql', () => {
     expect(creditUtilizationSummarySql).toContain("WHEN fx_rate IS NULL THEN 'missing_fx_rate'");
     expect(creditUtilizationSummarySql).toContain('as_of >= CURRENT_DATE - 7');
   });
+
+  it('keeps account market scope explicit and parameterized', () => {
+    const accounts = buildAccountsSummaryQuery(undefined, 'TZ');
+    const utilization = buildCreditUtilizationSummaryQuery('TZ');
+
+    expect(accounts.text).toContain('a.market_code = $1');
+    expect(utilization.text).toContain('a.market_code = $1');
+    expect(accounts.values).toEqual(['TZ']);
+    expect(utilization.values).toEqual(['TZ']);
+  });
 });
 
 describe('buildTransactionQueries', () => {
   it('keeps search text and filters in query parameters', () => {
     const spec = transactionQuerySchema.parse({
       accountId: 'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
+      market: 'TZ',
       search: `Cafe%' OR true --`,
       direction: 'debit',
       page: '2',
@@ -48,12 +61,14 @@ describe('buildTransactionQueries', () => {
     );
     expect(built.data.values).toEqual([
       'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
+      'TZ',
       'debit',
       `%Cafe\\%' OR true --%`,
       10,
       10
     ]);
-    expect(built.count.values).toHaveLength(3);
+    expect(built.count.values).toHaveLength(4);
+    expect(built.data.text).toContain('market_code = $2');
   });
 
   it('sorts amount choices by magnitude and applies the requested page offset', () => {
@@ -84,12 +99,29 @@ describe('buildTransactionQueries', () => {
     const built = buildTransactionQueries(transactionQuerySchema.parse({}));
     expect(built.data.text).toContain("s.reconcile_status IN ('ok', 'gap', 'pending')");
   });
+
+  it('applies market scope to transaction detail and its FX evidence', () => {
+    const transactionId = '57e68f0d-846d-4f0e-858b-2838992d2bab';
+    const detail = buildTransactionQueries(
+      transactionQuerySchema.parse({ market: 'TZ', pageSize: 1 }),
+      transactionId
+    );
+    const fx = buildFxAnalyticsQuery({ market: 'TZ' }, transactionId);
+
+    expect(detail.data.text).toContain('id = $1::uuid');
+    expect(detail.data.text).toContain('market_code = $2');
+    expect(detail.data.values).toEqual([transactionId, 'TZ', 1, 0]);
+    expect(fx.text).toContain('scoped_account.market_code = $1');
+    expect(fx.text).toContain('t.id = $2::uuid');
+    expect(fx.values).toEqual(['TZ', transactionId]);
+  });
 });
 
 describe('analytics query builders', () => {
   it('parameterizes account and date filters', () => {
     const spec = analyticsQuerySchema.parse({
       accountId: 'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
+      market: 'CA',
       from: '2026-01-01',
       to: '2026-06-30'
     });
@@ -98,10 +130,13 @@ describe('analytics query builders', () => {
 
     expect(balance.values).toEqual([
       'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
+      'CA',
       '2026-01-01',
       '2026-06-30'
     ]);
     expect(cashflow.values).toEqual(balance.values);
+    expect(balance.text).toContain('a.market_code = $2');
+    expect(cashflow.text).toContain('scoped_account.market_code = $2');
     expect(balance.text).not.toContain('e1bb45a1');
     expect(cashflow.text).not.toContain('2026-01-01');
   });

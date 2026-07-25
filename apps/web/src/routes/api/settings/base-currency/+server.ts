@@ -14,14 +14,6 @@ export async function POST({ request }) {
   }
   const parsed = baseCurrencyChangeSchema.safeParse(body);
   if (!parsed.success) return validationError(parsed.error);
-  if (parsed.data.baseCurrency !== 'CAD') {
-    return apiError(
-      409,
-      'base_currency_fixed',
-      'Phase 2 keeps CAD as the fixed reporting currency; account-native values remain unchanged.'
-    );
-  }
-
   try {
     const target = parsed.data.baseCurrency;
     const accepted = await enqueueJob(

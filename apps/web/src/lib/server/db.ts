@@ -1,6 +1,6 @@
 import pg from 'pg';
 import type { QueryResultRow } from 'pg';
-import type { AnalyticsQuery, TransactionQuery } from '@ledger/shared-types';
+import type { AnalyticsQuery, MarketCode, TransactionQuery } from '@ledger/shared-types';
 
 import { databaseConfig, fxMaxStalenessDays } from './env.js';
 
@@ -19,9 +19,12 @@ export function query<T extends QueryResultRow>(text: string, values: readonly u
 
 type BuiltQuery = { text: string; values: unknown[] };
 
-export function buildAccountsSummaryQuery(accountId?: string): BuiltQuery {
+export function buildAccountsSummaryQuery(accountId?: string, market?: MarketCode): BuiltQuery {
   const values: unknown[] = [];
-  const where = accountId ? `WHERE a.id = ${addValue(values, accountId)}::uuid` : '';
+  const conditions: string[] = [];
+  if (accountId) conditions.push(`a.id = ${addValue(values, accountId)}::uuid`);
+  if (market) conditions.push(`a.market_code = ${addValue(values, market)}`);
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return {
     text: `
       WITH setting AS (
@@ -36,6 +39,7 @@ export function buildAccountsSummaryQuery(accountId?: string): BuiltQuery {
           i.name AS institution_name,
           a.kind,
           a.native_currency,
+          a.market_code,
           a.account_ref_masked,
           a.credit_limit,
           setting.base_currency,
@@ -96,6 +100,7 @@ export function buildAccountsSummaryQuery(accountId?: string): BuiltQuery {
         positions.institution_name,
         positions.kind,
         positions.native_currency,
+        positions.market_code,
         positions.account_ref_masked,
         positions.current_balance::text,
         CASE
@@ -148,7 +153,10 @@ export function buildAccountsSummaryQuery(accountId?: string): BuiltQuery {
 
 export const accountsSummarySql = buildAccountsSummaryQuery().text;
 
-export const creditUtilizationSummarySql = `
+export function buildCreditUtilizationSummaryQuery(market?: MarketCode): BuiltQuery {
+  const values: unknown[] = [];
+  const marketWhere = market ? `AND a.market_code = ${addValue(values, market)}` : '';
+  return { text: `
   WITH setting AS (
     SELECT base_currency
     FROM ledger_settings
@@ -202,6 +210,7 @@ export const creditUtilizationSummarySql = `
       WHERE t.account_id = a.id
     ) activity ON true
     WHERE a.kind = 'credit_card'
+      ${marketWhere}
   ), valued AS (
     SELECT
       positions.*,
@@ -273,7 +282,10 @@ export const creditUtilizationSummarySql = `
   FROM setting
   LEFT JOIN evaluated ON true
   GROUP BY setting.base_currency
-`;
+`, values };
+}
+
+export const creditUtilizationSummarySql = buildCreditUtilizationSummaryQuery().text;
 
 const transactionSortSql: Record<TransactionQuery['sort'], string> = {
   booked_date_desc:
@@ -295,7 +307,7 @@ function escapeLike(value: string) {
   return value.replace(/[\\%_]/g, '\\$&');
 }
 
-export function buildTransactionQueries(spec: TransactionQuery): {
+export function buildTransactionQueries(spec: TransactionQuery, transactionId?: string): {
   data: BuiltQuery;
   count: BuiltQuery;
 } {
@@ -303,6 +315,8 @@ export function buildTransactionQueries(spec: TransactionQuery): {
   const conditions: string[] = [];
 
   if (spec.accountId) conditions.push(`account_id = ${addValue(values, spec.accountId)}`);
+  if (transactionId) conditions.push(`id = ${addValue(values, transactionId)}::uuid`);
+  if (spec.market) conditions.push(`market_code = ${addValue(values, spec.market)}`);
   if (spec.categoryId) conditions.push(`category_id = ${addValue(values, spec.categoryId)}`);
   if (spec.direction) conditions.push(`direction = ${addValue(values, spec.direction)}`);
   if (spec.from) conditions.push(`booked_date >= ${addValue(values, spec.from)}::date`);
@@ -363,6 +377,7 @@ export function buildTransactionQueries(spec: TransactionQuery): {
         t.statement_id,
         source_statement.period_start AS statement_period_start,
         a.display_name AS account_name,
+        a.market_code,
         t.booked_date,
         t.posted_date,
         t.description_raw,
@@ -489,6 +504,13 @@ export function buildTransactionQueries(spec: TransactionQuery): {
 function buildAnalyticsConditions(spec: AnalyticsQuery, values: unknown[], alias = 't') {
   const conditions: string[] = [];
   if (spec.accountId) conditions.push(`${alias}.account_id = ${addValue(values, spec.accountId)}`);
+  if (spec.market) {
+    conditions.push(`EXISTS (
+      SELECT 1 FROM account scoped_account
+      WHERE scoped_account.id = ${alias}.account_id
+        AND scoped_account.market_code = ${addValue(values, spec.market)}
+    )`);
+  }
   if (spec.from) conditions.push(`${alias}.booked_date >= ${addValue(values, spec.from)}::date`);
   if (spec.to) conditions.push(`${alias}.booked_date <= ${addValue(values, spec.to)}::date`);
   return conditions;
@@ -511,8 +533,11 @@ export function buildBalanceQuery(spec: AnalyticsQuery): BuiltQuery {
   const selectedAccountConditions = spec.accountId
     ? [`a.id = ${addValue(values, spec.accountId)}`]
     : [];
+  if (spec.market) {
+    selectedAccountConditions.push(`a.market_code = ${addValue(values, spec.market)}`);
+  }
   // Once an unvalued transaction enters a consolidated running series, every
-  // later CAD balance is unknown until FX enrichment fills that gap. Omit
+  // later reporting balance is unknown until FX enrichment fills that gap. Omit
   // those points instead of coercing SQL NULL to a misleading chart zero.
   const outerConditions: string[] = ['balance IS NOT NULL'];
   if (spec.from) outerConditions.push(`date >= ${addValue(values, spec.from)}::date`);
@@ -706,9 +731,12 @@ export function transactionFlowSql(transactionAlias = 't', accountAlias = 'a') {
   )`;
 }
 
-export function buildNetWorthQuery(accountId?: string): BuiltQuery {
+export function buildNetWorthQuery(spec: Pick<AnalyticsQuery, 'accountId' | 'market'> = {}): BuiltQuery {
   const values: unknown[] = [];
-  const where = accountId ? `WHERE a.id = ${addValue(values, accountId)}::uuid` : '';
+  const conditions: string[] = [];
+  if (spec.accountId) conditions.push(`a.id = ${addValue(values, spec.accountId)}::uuid`);
+  if (spec.market) conditions.push(`a.market_code = ${addValue(values, spec.market)}`);
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return {
     text: `
       WITH setting AS (
@@ -830,9 +858,10 @@ export function buildNetWorthQuery(accountId?: string): BuiltQuery {
   };
 }
 
-export function buildFxAnalyticsQuery(spec: AnalyticsQuery): BuiltQuery {
+export function buildFxAnalyticsQuery(spec: AnalyticsQuery, transactionId?: string): BuiltQuery {
   const values: unknown[] = [];
   const conditions = buildAnalyticsConditions(spec, values);
+  if (transactionId) conditions.push(`t.id = ${addValue(values, transactionId)}::uuid`);
   conditions.push(`(
     (t.original_amount IS NOT NULL AND t.original_currency IS NOT NULL)
     OR t.fx_fee_amount_native IS NOT NULL

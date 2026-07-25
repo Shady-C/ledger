@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { insightSettingsPatchSchema } from '@ledger/shared-types';
+import { insightSettingsPatchSchema, optionalMarketQuerySchema } from '@ledger/shared-types';
 
 import {
   apiError,
@@ -9,7 +9,9 @@ import {
 } from '$lib/server/api.js';
 import { readInsightSettings, updateInsightSettings } from '$lib/server/insights.js';
 
-export async function GET() {
+export async function GET({ url }) {
+  const market = optionalMarketQuerySchema.safeParse(url.searchParams.get('market'));
+  if (!market.success) return validationError(market.error);
   try {
     return json(await readInsightSettings(), { headers: privateReadHeaders });
   } catch (error) {

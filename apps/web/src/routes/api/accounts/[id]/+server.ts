@@ -28,6 +28,7 @@ export async function PATCH({ params, request }) {
   if (parsed.data.displayName !== undefined) add('display_name', parsed.data.displayName);
   if (parsed.data.kind !== undefined) add('kind', parsed.data.kind);
   if (parsed.data.nativeCurrency !== undefined) add('native_currency', parsed.data.nativeCurrency);
+  if (parsed.data.marketCode !== undefined) add('market_code', parsed.data.marketCode);
   if ('accountRefMasked' in parsed.data) add('account_ref_masked', parsed.data.accountRefMasked);
   if ('creditLimit' in parsed.data) add('credit_limit', parsed.data.creditLimit, '::numeric');
   values.push(id.data);

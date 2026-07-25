@@ -9,6 +9,7 @@ export type AccountSummaryRow = {
   institution_name: string | null;
   kind: 'credit_card' | 'chequing' | 'savings' | 'wallet';
   native_currency: string;
+  market_code: 'CA' | 'TZ' | null;
   account_ref_masked: string | null;
   current_balance: string;
   current_balance_base: string | null;
@@ -29,6 +30,7 @@ export function mapAccountSummary(row: AccountSummaryRow) {
     institutionName: row.institution_name,
     kind: row.kind,
     nativeCurrency: row.native_currency,
+    marketCode: row.market_code,
     accountRefMasked: row.account_ref_masked,
     currentBalance: row.current_balance,
     currentBalanceBase: row.current_balance_base,
