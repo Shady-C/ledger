@@ -5,10 +5,10 @@
 > ledger, computes money deterministically, and later adds a grounded
 > natural-language layer.
 
-**Status:** Phase 1 completed on 2026-07-24. Phase 2 is `in_review`; its
-foundation, automated verification, and supplied I&M Tanzania TZS real-bank
-acceptance gates are implemented and passing. A named USD institution adapter
-is deferred under ADR-0006.
+**Status:** Phase 1 completed on 2026-07-24. ADR-0007 remediation and the
+expanded gates pass, so Phase 2 is `in_review`. ADR-0008's CAD/TZS home-currency
+implementation is present as a separately gated, unapproved Phase 2.1. A named
+USD institution adapter is deferred under ADR-0006.
 **Audience:** the person building it (you).
 **Author's stance:** every tech choice below is argued, not defaulted. Where I
 picked a non-obvious tool, there's an ADR explaining what I rejected and why.
@@ -45,7 +45,7 @@ These are load-bearing. Every later decision derives from them.
 5. **Model tiering by task.** Cheap model for high-volume small jobs; capable model for genuinely hard extraction/planning. (Table in §10.)
 6. **Every transaction is idempotent and auditable.** Re-uploading the same or overlapping statement never double-counts. Every derived value can be traced to source rows.
 7. **Money has three layers.** Optional original purchase money and required
-   account-posted money are immutable evidence. CAD reporting is a nullable,
+   account-posted money are immutable evidence. Home-currency reporting is a nullable,
    recomputable lens and never replaces either source layer.
 
 ### Notable non-default choices (called out because you asked)
@@ -141,6 +141,8 @@ erDiagram
     ACCOUNT ||--o{ ANALYTICS_MONTHLY_AGGREGATE : summarized_in
     RECURRING_SERIES ||--o{ RECURRING_OCCURRENCE : contains
     TXN ||--o{ RECURRING_OCCURRENCE : linked_as
+    ANALYTICS_THRESHOLD_PROFILE ||--o{ ANALYTICS_RUN : governs
+    ANALYTICS_THRESHOLD_PROFILE ||--o{ HOME_CURRENCY_SWITCH_AUDIT : records
 
     ACCOUNT {
         uuid id
@@ -148,6 +150,7 @@ erDiagram
         string display_name
         string kind  "credit_card | chequing | savings | wallet"
         string native_currency
+        string market_code "nullable CA | TZ"
         string account_ref_masked
         numeric credit_limit
     }
@@ -176,7 +179,7 @@ erDiagram
         numeric original_amount "nullable; signed"
         string  original_currency "nullable"
         numeric amount_base "nullable"
-        string  currency_base "CAD"
+        string  currency_base "CAD | TZS"
         numeric fx_rate "nullable"
         date    fx_rate_date "nullable"
         numeric fx_fee_amount_native "nullable; already posted"
@@ -241,7 +244,8 @@ erDiagram
     }
     LEDGER_SETTINGS {
         boolean singleton
-        string base_currency
+        string base_currency "CAD | TZS"
+        string market_profile "nullable CA | TZ"
         datetime updated_at
     }
     JOB {
@@ -254,8 +258,10 @@ erDiagram
     }
     ANALYTICS_MONTHLY_AGGREGATE {
         bigint generation
+        string market_scope "ALL | CA | TZ"
         date period_start
         string dimension_type "ledger | account | category | merchant"
+        string currency_base "CAD | TZS"
         numeric inflow_base
         numeric outflow_base
         numeric spending_base
@@ -265,6 +271,7 @@ erDiagram
     }
     RECURRING_SERIES {
         uuid id
+        string market_scope "ALL | CA | TZ"
         string detected_cadence "weekly | biweekly | monthly | quarterly | annual"
         string status "detected | confirmed | cancelled | ignored"
         date detected_next_date
@@ -280,6 +287,7 @@ erDiagram
     }
     INSIGHT_FINDING {
         uuid id
+        string market_scope "ALL | CA | TZ"
         string detector_type
         string detector_fingerprint
         string status "new | confirmed | dismissed | resolved"
@@ -298,11 +306,33 @@ erDiagram
     ANALYTICS_RUN {
         uuid id
         bigint generation
+        string base_currency "CAD | TZS"
+        string threshold_policy_version
         string mode "incremental | full"
         string status "queued | running | succeeded | failed"
         datetime source_watermark
         jsonb result
         string error
+    }
+    ANALYTICS_THRESHOLD_PROFILE {
+        string base_currency "CAD | TZS"
+        string policy_version
+        numeric minimum_difference_low
+        numeric minimum_difference_balanced
+        numeric minimum_difference_high
+        numeric minimum_price_increase
+        numeric source_rate "nullable for seeded CAD"
+        date source_rate_date "nullable for seeded CAD"
+    }
+    HOME_CURRENCY_SWITCH_AUDIT {
+        bigint id
+        string previous_currency "CAD | TZS"
+        string target_currency "CAD | TZS"
+        numeric conversion_rate
+        string rate_source
+        date rate_source_date
+        string threshold_policy_version
+        datetime switched_at
     }
 ```
 
@@ -311,7 +341,7 @@ erDiagram
 - **Sign convention is fixed at ingestion**, per account kind. Credit-card charges are `+`, payments/credits `-`; for a chequing account you may invert. The `direction` enum carries the semantic meaning so analytics never has to guess from sign alone.
 - **`amount_native` is bank-posted truth.** It is immutable and drives account
   reconciliation. Optional original money is separate evidence; nullable
-  `amount_base` / `fx_rate` values are derived CAD reporting data.
+  `amount_base` / `fx_rate` values are derived home-currency reporting data.
 - **Original amount/currency are paired.** Both are null or both are present,
   and their sign matches the posted transaction flow.
 - **Explicit FX fees are not duplicated.** An inline
@@ -372,7 +402,7 @@ sequenceDiagram
         W->>DB: save new ADAPTER (version++)
     end
     W->>W: 3. normalize → canonical rows
-    W->>W: 4. enrich CAD valuation when available
+    W->>W: 4. enrich active home-currency valuation when available
     W->>W: 5. merchant normalize + deterministic account-aware rules
     W->>W: 6. dedup by hash
     W->>W: 7. reconcile vs statement opening/closing
@@ -474,7 +504,7 @@ safe replay after schema evolution belong to Phase 4 ingestion hardening.
   two-sided arithmetic reconciliation; it is not labeled `ok`. A `mismatch`
   balance is rejected as an anchor.
 - **Post-persistence isolation:** categorization, FX-refresh, and analytics
-  enqueueing happen after financial persistence. Missing CAD valuation or a
+  enqueueing happen after financial persistence. Missing reporting valuation or a
   secondary queue/provider failure cannot roll back a successfully reconciled
   native import.
 
@@ -483,7 +513,7 @@ safe replay after schema evolution belong to Phase 4 ingestion hardening.
 ## 6. Multi-currency & FX
 
 - **Store three monetary layers:** optional original purchase money, required
-  account-posted/native money, and nullable derived CAD reporting money with
+  account-posted/native money, and nullable derived home-currency reporting money with
   the reference rate/date used.
 - **Accounts are single-currency:** TZS and USD balances at one bank become
   separate accounts. Statement currency and every posted row must match the
@@ -495,13 +525,22 @@ safe replay after schema evolution belong to Phase 4 ingestion hardening.
 - **One staleness policy:** both worker provider/cache code and web account,
   transaction, net-worth, and FX reads use the validated
   `FX_MAX_STALENESS_DAYS` configuration. Startup rejects values outside `0..7`.
-- **Native acceptance is independent of CAD availability:** a missing eligible
+- **Native acceptance is independent of reporting-rate availability:** a missing eligible
   rate leaves reporting fields null and `valuationStatus = pending_fx`, queues
   retryable refresh work, and makes consolidated analytics explicitly partial.
   A later refresh changes derived reporting fields only.
-- **CAD is fixed publicly for Phase 2.** Non-CAD switch requests return
-  `409 base_currency_fixed`. The internal atomic rebuild remains for migration
-  and recovery, not user-facing reporting changes.
+- **Market and home currency are independent.** Account `market_code` (`CA` or
+  `TZ`) drives the All/Canada/Tanzania data lens; nullable `market_profile` only
+  supplies first-visit and new-account defaults. Neither changes reporting.
+- **Home reporting is stable and explicitly maintained.** Stage 1 remains CAD.
+  Phase 2.1 supports only CAD and TZS through a confirmed Advanced action. The
+  worker takes the ledger advisory lock, rewrites reporting values exclusively
+  from immutable native amounts, unpublishes incompatible analytics, and queues
+  target-rate recovery plus a full matching-currency generation. Each successful
+  switch writes immutable rate/date and threshold-policy evidence. BASE-valued
+  recurring identities are transformed in place so review status, cadence, and
+  converted overrides survive; incompatible base-valued findings are resolved
+  and regenerated.
 - **FX analytics separate evidence:** explicit inline and standalone fees are
   actual costs. Bank-applied and reference rates produce a signed estimated
   markup only when evidence permits it; a known inline fee is removed from the
@@ -569,40 +608,51 @@ Phase 2 materializes deeper analytics in atomically published snapshots. An
 transaction corrections, and FX backfills. Incremental mode finds source months
 updated after the prior published watermark, recalculates every dimension for
 those months, and copies unaffected monthly aggregates from the previous
-generation. Recurring series and findings are recalculated ledger-wide in both
-modes because cadence, duplicate, and anomaly evidence can cross month
-boundaries. Full mode recalculates all aggregate periods plus the ledger-wide
-detectors. Jobs are deduplicated, publish one generation atomically, and record
+generation. Recurring series and findings are recalculated from full source
+history independently within `ALL`, `CA`, and `TZ` in both modes because
+cadence, duplicate, and anomaly evidence can cross month boundaries. Full mode
+recalculates all aggregate periods plus those scoped detectors. Jobs are
+deduplicated, publish one matching-currency generation atomically, and record
 the source watermark, affected-period list, counts, duration, and errors.
 
 **Trends and seasonality** use a 12-month default with 3-, 6-, 24-month, and
 all-history ranges. Monthly inflow, outflow, net cash flow, and spending can be
 grouped by account, category, or merchant and compared month-over-month,
 year-over-year, or against trailing three-month average/median baselines.
-Seasonality requires at least 12 months. Unvalued rows are excluded from CAD
+Seasonality requires at least 12 months. Unvalued rows are excluded from reporting
 totals, counted by native currency, and make coverage `partial`.
 
 **Recurring detection** excludes transfers and card payments from spending and
 uses deterministic cadence windows: weekly 5–9 days, biweekly 12–16, monthly
 25–35, quarterly 80–100, and annual 330–400. A series needs three occurrences,
 except annual candidates may use two. Comparison prefers consistent original
-currency, then account-native currency, then fully valued CAD. Expected-next
+currency, then account-native currency, then fully valued reporting money. Expected-next
 date and overdue are recurrence metadata, not forecasting. User confirmation,
 cadence/amount corrections, cancellation, and ignore state survive refreshes.
 
 **Findings** cover unusual transaction amounts/frequency, monthly category or
 merchant spikes, near-duplicates, recurring price increases/overdue activity,
-reconciliation mismatch, coverage gaps, and pending CAD valuation. Every
+reconciliation mismatch, coverage gaps, and pending reporting valuation. Every
 finding stores evidence, severity, first/last-seen dates, a stable detector
 fingerprint, and durable `new`, `confirmed`, `dismissed`, or `resolved` state.
 
-Balanced amount/spike sensitivity uses modified z-score `>= 3.5`, at least five
-prior comparable observations, and at least CAD 10 difference; low/high presets
-use `5.0`/CAD 25 and `2.5`/CAD 5. An interquartile-range rule handles zero MAD.
+Balanced amount/spike sensitivity uses modified z-score `>= 3.5` and at least
+five prior comparable observations. The seeded CAD `materiality-v1` profile
+uses low/balanced/high floors of CAD `25.00`/`10.00`/`5.00` and a CAD `1.00`
+price-increase floor. The first TZS switch converts those values with a dated,
+non-stale rate and freezes the exact rounded TZS profile for reuse. An
+interquartile-range rule handles zero MAD.
 Near-duplicates require distinct identities with the same account, merchant,
 posted currency, and absolute posted amount within three days and exclude
 refunds, reversals, transfers, and payments. Default recurring price-change
-materiality is at least 5% and CAD 1 (or comparison-basis equivalent).
+materiality is at least 5% and the active frozen profile's reporting-money floor.
+
+Analytics materializes each generation for `ALL`, `CA`, and `TZ`. All includes
+unassigned accounts; regional scopes include only explicitly assigned accounts,
+even when their native currency is foreign to that market. Scope participates
+in recurring/finding fingerprints and review identity. Runs and aggregates are
+also bound to the active home currency and threshold-policy version. Readers
+return `analytics_rebuilding` when no matching generation is published.
 
 Forecasting remains Phase 4. No model computes analytics or sees transaction
 history for finding detection.
@@ -685,6 +735,7 @@ GET    /api/institutions
 POST   /api/institutions
 PATCH  /api/institutions/:id
 GET    /api/transactions
+GET    /api/transactions/:id
 PATCH  /api/transactions/:id
 GET    /api/categories
 POST   /api/categories
@@ -695,7 +746,8 @@ PATCH  /api/categories/proposals/:id
 POST   /api/categories/categorize
 GET    /api/analytics/:view     balance | cashflow | net-worth | fx
 GET    /api/settings
-POST   /api/settings/base-currency        CAD only; non-CAD → 409
+PATCH  /api/settings
+POST   /api/settings/base-currency        confirmed CAD/TZS maintenance action
 GET    /api/insights/summary
 GET    /api/insights/trends
 GET    /api/insights/seasonality
@@ -708,7 +760,9 @@ PATCH  /api/insights/settings
 POST   /api/insights/rebuild
 ```
 
-Transaction responses expose nullable `originalAmount`, `originalCurrency`,
+Account, transaction, ordinary analytics, FX, and every Insights read accept an
+optional `market=CA|TZ`; omission means All. Account and market filters combine
+conjunctively. Transaction responses expose nullable `originalAmount`, `originalCurrency`,
 `amountBase`, `fxRate`, and `fxRateDate`, plus `fxFeeAmountNative`, `isFxFee`,
 and `valuationStatus`. `amountNative`/`currencyNative` retain their posted
 account meaning. All money remains exact decimal strings.
@@ -723,15 +777,16 @@ not part of the Phase 2 server.
 ## 12. Clients
 
 - **SvelteKit PWA** — installable on iOS/Android/desktop from one codebase. The
-  shared shell provides Dashboard, Transactions, Accounts, Categories, Imports,
-  and Insights navigation.
-- **Insights workflow:** `/insights` contains Overview, Trends, Recurring, and
-  Findings tabs with filters, calculation evidence, review actions, and
-  complete/partial coverage. The Dashboard adds only a concise summary and
-  unread-finding badge.
-- **Transaction amount stack:** one Amount column labels Original, Posted, and
-  Reporting CAD values, omits duplicate layers, and reports “CAD valuation
-  pending” instead of substituting a rate.
+  shared shell carries All/Canada/Tanzania scope. Desktop keeps direct feature
+  links; mobile is Home, Activity, Insights, More.
+- **Insights workflow:** `/insights` contains Overview, Trends, Recurring,
+  Findings, and FX tabs with filters, calculation evidence, review actions, and
+  complete/partial coverage. Home is limited to scoped reporting net worth,
+  native account balances, and recent posted activity.
+- **Progressive transaction disclosure:** Activity shows one account-posted
+  amount plus `FX`, `Converted`, and/or `Pending`. A responsive accessible
+  drawer exposes original/posted/reporting money, rates, fees, markup, and both
+  balances. Mixed-currency amount sorting is labeled as reporting order.
 - **Narrow offline boundary:** shell assets and `/` use the shell cache. Only
   `/api/analytics/balance` and `/api/analytics/cashflow` use a network-first
   private-read cache. Net-worth responses are never service-worker cached.
@@ -811,11 +866,16 @@ net worth, category taxonomy, learned mappings, and user overrides. The client
 is split into Dashboard, Transactions, Accounts, Categories, and Imports.
 
 **Phase 2 — Three-layer money + analytics depth (in review).**
-Original/posted/CAD provenance, fixed public CAD reporting, deferred FX
+Original/posted/reporting provenance, deferred FX, explicit market scopes,
 valuation, supplied I&M Tanzania TZS acceptance, materialized trends and
 seasonality, recurring/renewal/price-hike detection, anomaly/data-quality
 findings, durable review state, and the Insights workflow. A named USD
 institution adapter is deferred by ADR-0006.
+
+**Phase 2.1 — Configurable home currency (implementation present; approval
+gated).** Stable CAD/TZS reporting rebuilt from immutable native money,
+currency-fenced analytics publication, frozen materiality profiles, maintenance
+state, and immutable switch evidence under ADR-0008.
 
 **Phase 3 — Ask it things.**
 Query DSL + validator + executor, the tool-using agent, narration, the ask-bar
@@ -832,19 +892,21 @@ forecasts, offline hardening, and deployment polish.
 1. Keep the Python worker plus SvelteKit web/API split.
 2. Keep the self-hosted Docker Compose path and single-user product boundary.
 3. Keep TZS, USD, and CAD accounts single-currency and preserve original,
-   posted/native, and CAD reporting money as distinct layers.
+   posted/native, and reporting money as distinct layers.
 4. Use Frankfurter v2 for the cached FX feed.
 5. Use Anthropic first behind the provider interface, with minimized structured
    inputs and reviewed taxonomy changes per ADR-0003.
 6. Keep irregular-PDF AI extraction and local OCR/model work in Phase 4.
 7. Move imported-account net worth into Phase 1 per ADR-0004; manual assets and
    debts remain deferred.
-8. Fix the public reporting lens to CAD, retain internal rebuilds for recovery,
-   and defer unavailable valuations without losing native reconciliation.
+8. Keep Stage 1 reporting fixed to CAD; support stable CAD/TZS home reporting
+   only through the ADR-0008 maintenance workflow.
 9. Materialize analytics deterministically and preserve recurring corrections
    and finding review states across atomic refreshes per ADR-0005.
 10. Keep forecasting in Phase 4, natural-language querying in Phase 3, and all
     Phase 2 findings in-app only.
+11. Keep one repository/product/engine and model market membership, market
+    profile, and home currency as independent concepts per ADR-0007.
 
 ---
 

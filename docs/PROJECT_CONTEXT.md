@@ -10,7 +10,7 @@ Confluence Space: N/A
 Ledger is a self-hostable personal-finance application that imports bank
 statements into one auditable canonical ledger. Financial values are parsed,
 stored, reconciled, converted, aggregated, and analyzed with deterministic
-code. Phase 2 makes original, account-posted, and CAD-reporting money explicit
+code. Phase 2 makes original, account-posted, and reporting money explicit
 and adds materialized trends, recurring-series detection, and explainable
 reviewable findings.
 
@@ -28,10 +28,10 @@ Phase 2 is complete when the local stack can:
 1. Preserve every Phase 0/1 ingestion, idempotency, reconciliation, privacy,
    and security guarantee, including the `2855.59` closing balance.
 2. Represent optional original purchase money, exact account-posted money, and
-   nullable derived CAD reporting money without conflating the three layers.
+   nullable derived reporting money without conflating the three layers.
 3. Import a statement only into an account of the same posted currency, reject
    mixed posted currencies, and keep separate TZS and USD account balances.
-4. Persist and reconcile valid native transactions when CAD rates are missing,
+4. Persist and reconcile valid native transactions when reporting rates are missing,
    report them as `pending_fx`, and backfill only derived valuation later.
 5. Accept the supplied sanitized real I&M Tanzania TZS-account statements
    through a versioned institution adapter with exact reconciliation and
@@ -41,8 +41,9 @@ Phase 2 is complete when the local stack can:
    activity, renewals, price changes, and explainable findings.
 7. Preserve user recurring corrections and finding review state through
    incremental and full analytics refreshes.
-8. Provide an accessible `/insights` workflow and a compact Dashboard summary
-   while retaining exact decimal API contracts and explicit partial coverage.
+8. Provide All/Canada/Tanzania account scopes, a single posted amount with
+   progressively disclosed conversion evidence, an accessible `/insights`
+   workflow, and a compact three-section Dashboard.
 9. Meet the regression, performance, production-build, clean-migration/seed,
    and disposable fresh-stack gates in the Phase 2 build plan.
 
@@ -59,37 +60,45 @@ model, four service-job kinds, OFX/QFX and validated tabular ingestion,
 governed categorization, historical FX caching, account/net-worth analytics,
 and five focused application routes.
 
-Phase 2 is now `in_review`. Migrations `012` and `013`, the three-layer
-worker/persistence paths, deterministic generic CSV/XLSX support, materialized
-analytics worker, shared contracts, Insights APIs, `/insights` route, compact
-transaction amount stack, and Dashboard integration are present in the working
-tree. Incremental refreshes recompute monthly aggregates for source months
-changed since the published watermark and copy unaffected monthly rows into the
-new generation; recurring series and findings are deliberately recomputed over
-the full ledger because their evidence can cross period boundaries. Full mode
-rebuilds all derived data, and both modes publish one generation atomically.
+Phase 2 review identified an information-hierarchy and market-scoping gap.
+ADR-0007 remediation is now implemented alongside the separately gated
+ADR-0008 Phase 2.1 follow-up. Migrations `012`–`015`, the three-layer
+worker/persistence paths, deterministic generic CSV/XLSX support, market-scoped
+materialized analytics, shared contracts, scoped APIs, transaction conversion
+details, the simplified Home and Activity experiences, Insights FX, Settings
+Advanced, `/more`, and configurable CAD/TZS home reporting are present in the
+working tree. Incremental refreshes recompute monthly aggregates for source
+months changed since the published watermark and copy unaffected monthly rows
+into the new generation; recurring series and findings are deliberately
+recomputed from full source history independently within each `ALL`, `CA`, and
+`TZ` scope because their evidence can cross period boundaries. Full mode
+rebuilds all derived data, and both modes publish one currency-fenced generation
+atomically.
 
 The final automated synthetic verification checkpoint passes:
 
 - `make check`: Svelte reports zero errors and zero warnings; Ruff passes; and
   strict mypy succeeds across 32 source/script files.
-- `make test`: 22 shared-contract, 48 web-server, 7 component, 15 Playwright,
-  and 185 worker tests pass, with 1 intentional worker skip.
+- `make test`: 23 shared-contract, 63 web-server, 7 component, 20 Playwright,
+  and 196 worker tests pass, with 1 intentional worker skip.
 - `pnpm build` completes the production web build.
-- Disposable PostgreSQL acceptance applies migrations `001`–`013` from empty,
-  upgrades Phase 1 data without changing posted/CAD values, backfills valid
-  Amex original money, enforces currency constraints, accepts pending-CAD TZS
-  truth, queues FX/analytics work, and rolls back/reapplies `012`/`013`.
+- Disposable PostgreSQL acceptance applies migrations `001`–`015` from empty,
+  upgrades Phase 1 data without inferring account markets or changing native
+  truth, preserves legacy review state, exercises scoped materialization and
+  market-reassignment guards, proves CAD→TZS→CAD rebuilding and immutable switch
+  auditing, fences analytics publication by currency, rolls back/reapplies the
+  upgrade path, and refuses rollback while TZS is active.
 - The disposable 100,000-transaction benchmark completes a production full
-  analytics rebuild in `8.298s` against the `120s` limit; its slowest warm
-  materialized read is `2.212ms` against the `1000ms` limit.
+  analytics rebuild in `16.385s` against the `120s` limit; its slowest warm
+  materialized read is `1.721ms` against the `1000ms` limit.
 - A uniquely named isolated Compose project rebuilt the current images, applied
-  clean migrations `001`–`013` plus the seed, and passed the Phase 2 `make
+  clean migrations `001`–`015` plus the seed, and passed the Phase 2 `make
   smoke` contract: the Phase 0 statement reconciled to `2855.59` with six rows
-  and zero on repeat; synthetic USD/TZS activity proved both three-layer flow
-  directions, fixed CAD, explicit fee/markup evidence, analytics refresh,
-  materialized Insights reads, and durable finding review. Its disposable
-  project/volumes were removed, and the default user stack was untouched.
+  and zero on repeat; synthetic USD/TZS activity proved explicit market scopes,
+  both three-layer flow directions, CAD/TZS round trips, explicit fee/markup
+  evidence, analytics refresh, materialized Insights reads, and durable finding
+  review. Its disposable project/volumes were removed, and the default user
+  stack was untouched.
 
 The supplied local acceptance set now covers eleven sanitized I&M Bank Tanzania
 TZS image-PDF statements through `im_bank_tz_pdf_v1`. All eleven reconcile
@@ -104,8 +113,17 @@ ADR-0006 defers a named real-USD institution adapter until a sanitized sample is
 supplied. Generic USD CSV/XLSX/OFX behavior and both original/posted currency
 directions remain covered by deterministic synthetic tests. The supplied PDFs
 remain local ignored inputs; only sanitized OCR-text derivatives are checked in.
-With the real TZS and automated gates satisfied, Phase 2 is ready for review,
-but it is not closed until review is approved.
+The real TZS and expanded automated gates remain satisfied. Market-scoped UX
+review remediation is complete, so Phase 2 has returned to `in_review`.
+Phase 2.1 implementation is present but remains a separate approval gate.
+
+ADR-0007 keeps one product and financial engine while adding explicit nullable
+account market membership, a separate ledger market profile, and materialized
+All/Canada/Tanzania analytics. Unassigned upgraded accounts remain visible only
+under All. ADR-0008 defines the separately gated Phase 2.1 follow-up: the stable
+home reporting currency may be CAD or TZS, switches rebuild exclusively from
+immutable native money under the ledger advisory lock, and Insights enter an
+explicit maintenance state until a matching-currency generation is published.
 
 ## Technology Stack
 
@@ -129,7 +147,7 @@ The SvelteKit service owns the browser UI and HTTP API. It stores encrypted
 uploads in MinIO, writes jobs to PostgreSQL, and serves parameterized ledger and
 Insights reads. In the Phase 2 implementation, the Python worker claims queued work
 with row locking, selects or learns a validated adapter, normalizes and
-persists native rows, reconciles statements, enriches available CAD valuation,
+persists native rows, reconciles statements, enriches available reporting valuation,
 and materializes analytics. PostgreSQL remains the source of truth for ledger
 rows, cached rates, analytics snapshots, finding review state, settings, and
 run metadata.
@@ -137,8 +155,9 @@ run metadata.
 The Phase 2 processing contract adds `analytics_refresh` after successful
 ingestion, category/proposal or transaction corrections, and FX backfills. Its
 incremental mode refreshes affected monthly periods and carries forward
-unaffected aggregate rows; recurrence and finding detectors still evaluate the
-ledger-wide evidence set. Full mode rebuilds all derived data. Jobs are
+unaffected aggregate rows; recurrence and finding detectors evaluate full
+source history independently within `ALL`, `CA`, and `TZ`. Full mode rebuilds
+all derived data. Jobs are
 deduplicated, report their affected periods, and publish atomically so readers
 do not observe a partial snapshot. Models may propose redacted mappings or
 categories; no model computes money, statistics, recurring series, or findings.
@@ -151,7 +170,7 @@ A transaction has three separate monetary layers:
   evidence and must be present together.
 - `amount_native` and `currency_native` are required immutable bank-posted
   account truth and drive reconciliation and deduplication.
-- `amount_base`, `fx_rate`, and `fx_rate_date` are nullable derived CAD
+- `amount_base`, `fx_rate`, and `fx_rate_date` are nullable derived home-currency
   reporting values; missing eligible rates produce `pending_fx`.
 
 `fx_fee_amount_native` represents an explicit inline fee already included in
@@ -164,10 +183,13 @@ Every account and statement has one posted currency. Reconciliation remains:
 
 `opening_balance + sum(amount_native) = closing_balance`
 
-CAD is the fixed public reporting lens for Phase 2. An internal base rebuild is
-retained only for migration/recovery compatibility. Monthly aggregates,
+Stage 1 retains CAD as the reporting lens while adding independent market
+scopes. Phase 2.1 supports stable CAD or TZS home reporting; a switch is an
+explicit Advanced maintenance operation, never a market-selector action.
+Monthly aggregates,
 recurring series/occurrences, findings, analytics settings, and analytics-run
-metadata are durable derived state governed by ADR-0005.
+metadata are durable derived state governed by ADR-0005 and ADR-0008. Every
+generation is bound to its home currency and frozen threshold-policy version.
 
 ## Phase Roadmap
 
@@ -175,7 +197,8 @@ metadata are durable derived state governed by ADR-0005.
 |---|---|---|
 | 0 | Ledger core, deterministic ingestion, basic dashboard | Completed |
 | 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | Completed 2026-07-24 |
-| 2 | Three-layer money, real TZS acceptance, deep analytics and Insights | In review |
+| 2 | Three-layer money, real TZS acceptance, market-scoped UX, deep analytics and Insights | In review |
+| 2.1 | Stable CAD/TZS home reporting and currency-fenced analytics rebuilds | Implementation present; approval gated |
 | 3 | Grounded natural-language query layer | Not started |
 | 4 | Ingestion hardening, adapter review/schema evolution, offline polish, forecasts | Not started |
 
@@ -193,20 +216,27 @@ metadata are durable derived state governed by ADR-0005.
   [ADR-0003](decisions/0003-ai-categorization-proposals.md).
 - Treat cards as liabilities and value imported-account net worth per
   [ADR-0004](decisions/0004-account-positions-and-net-worth.md).
-- Preserve original, posted, and nullable CAD-reporting layers; defer missing
-  valuations; and materialize durable deterministic insights per
-  [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md).
+- Preserve original, posted, and nullable reporting layers; defer missing
+  valuations; and materialize durable deterministic insights per ADR-0005.
+  ADR-0008 supersedes only ADR-0005's Stage 1 fixed-CAD clause and supports
+  stable CAD/TZS home reporting through the maintenance workflow.
 - Accept the supplied image-only I&M Tanzania TZS layout through bounded local
   OCR and exact ledger checks, while deferring named USD-statement acceptance,
   per
   [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md).
+- Keep one product and engine; model account markets separately from the
+  ledger-level market profile and reporting currency per
+  [ADR-0007](decisions/0007-market-scopes-and-progressive-disclosure.md).
+- Support only CAD and TZS as stable home currencies, rebuilding reporting
+  values from immutable native money and fencing analytics publication per
+  [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md).
 
 ## Environment and Data Safety
 
 The committed `.env.example` is authoritative for database, object-storage,
 statement encryption, services, FX endpoint/staleness, polling, and AI provider
-configuration. CAD is the fixed Phase 2 public reporting currency, not a
-user-switchable environment option. Real `.env` files and credentials must
+configuration. Home currency is persisted ledger state and may be changed only
+through the confirmed Advanced maintenance workflow. Real `.env` files and credentials must
 never be committed. Losing the production statement-encryption key makes
 stored raw files unreadable.
 

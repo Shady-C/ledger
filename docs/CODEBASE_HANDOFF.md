@@ -9,9 +9,9 @@
 This handoff starts from the completed Phase 1 implementation and describes the
 current Phase 2 working tree. The three-layer schema/worker paths, generic
 CSV/XLSX ingestion, analytics materialization, public contracts, Insights APIs,
-and UI are implemented. Automated synthetic verification and the supplied I&M
-Tanzania TZS real-bank acceptance set pass; the phase is awaiting review rather
-than additional implementation.
+and UI are implemented. ADR-0007 market-scoped UX remediation and the
+separately gated ADR-0008 CAD/TZS home-currency implementation are present and
+the expanded gates pass. Phase 2.1 approval remains separate from Phase 2.
 
 ## Read These First
 
@@ -28,8 +28,9 @@ than additional implementation.
    [ADR-0003](decisions/0003-ai-categorization-proposals.md),
    [ADR-0004](decisions/0004-account-positions-and-net-worth.md),
    [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md),
-   and
-   [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md).
+   [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md),
+   [ADR-0007](decisions/0007-market-scopes-and-progressive-disclosure.md),
+   and [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md).
 7. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
 
 `docs/` is canonical. Jira and Confluence are not configured for this project;
@@ -39,7 +40,7 @@ the local Phase 2 build plan is the active backlog.
 
 ```mermaid
 flowchart LR
-    Browser["Six-route SvelteKit PWA"] --> Web["SvelteKit API/BFF"]
+    Browser["Market-scoped SvelteKit PWA"] --> Web["SvelteKit API/BFF"]
     Web --> PG[("PostgreSQL 16 + pgvector")]
     Web --> MinIO[("MinIO encrypted objects")]
     Web -->|"enqueue"| Jobs["PostgreSQL job queue"]
@@ -66,11 +67,11 @@ review proposals, analytics snapshots/review state, and job state.
 | `packages/shared-types/` | Zod schemas and canonical TypeScript request/response contracts |
 | `services/worker/worker/` | Python ingestion, provider integrations, service jobs, and persistence |
 | `services/worker/tests/` | Worker regression tests and synthetic fixture policy |
-| `db/migrations/` | Ordered schema migrations; Phase 1 ends at `011`, Phase 2 begins at `012` |
+| `db/migrations/` | Ordered schema migrations; `014` adds market scopes and `015` adds CAD/TZS home-currency fencing |
 | `db/seeds/` | Idempotent taxonomy and local development account seed |
 | `scripts/phase0_smoke.py` | Golden Phase 0 `2855.59` and repeat-import flow |
 | `scripts/phase1_smoke.py` | Historical Phase 1 synthetic flow and shared smoke helpers |
-| `scripts/phase2_smoke.py` | Active synthetic fixed-CAD, three-layer money, FX, analytics, and Insights smoke |
+| `scripts/phase2_smoke.py` | Active synthetic three-layer money, FX, scoped analytics, and Insights smoke |
 | `scripts/phase2_analytics_benchmark.py` | Disposable 100k full-refresh and warm materialized-read performance gate |
 | `docs/` | Source-of-truth scope, architecture, decisions, plans, and handoff |
 
@@ -109,10 +110,10 @@ curl --fail --silent --show-error http://127.0.0.1:3000/api/health
 imports still work, unknown CSV/XLSX files settle as `needs_ai`, and existing
 categorization proposals remain reviewable; new categorization jobs cannot run.
 
-The Phase 1 baseline stores reporting currency in the singleton
-`ledger_settings` row and seeds `CAD`. Phase 2 fixes the public reporting lens
-to CAD: non-CAD public changes return `409 base_currency_fixed`, while the
-internal rebuild path remains available for migration and recovery.
+The singleton `ledger_settings` row stores independent `market_profile` and
+`base_currency` values. Market profile supplies defaults only. Home currency is
+stable CAD or TZS and changes only through the confirmed Advanced maintenance
+path, which rebuilds from native values and temporarily unpublishes Insights.
 
 ## Current Application Routes
 
@@ -122,15 +123,17 @@ routes are:
 
 | Route | Current responsibility |
 |---|---|
-| `/` | Net worth, assets/liabilities, completeness, utilization, balance/cash-flow charts, actual-versus-estimated FX evidence, recent transactions, and concise Insights summary/unread badge |
-| `/transactions` | URL-backed filters, sort, paging, Original/Posted/Reporting amount stack, nullable CAD valuation, running balances, provenance, and category correction |
-| `/accounts` | Asset/card sections, account and institution editing, and card limits/utilization; the public base-currency control is removed |
+| `/` | Scoped reporting net worth, scoped accounts with native balances, and recent posted activity |
+| `/transactions` | Scoped URL-backed filters/sort/paging, one posted amount, conversion indicators, responsive audit drawer, and category correction |
+| `/accounts` | Scoped asset/card sections, market assignment, account/institution editing, and card limits/utilization |
 | `/categories` | Taxonomy editing/archive, unresolved work, proposal review, and categorization retry |
 | `/imports` | Account-targeted upload, job polling, history, reconciliation, failure, and `needs_ai` states |
-| `/insights` | Overview, Trends, Recurring, and Findings tabs; ranges/entity filters, evidence, review/correction actions, sensitivity, and full rebuild control |
+| `/insights` | Overview, Trends, Recurring, Findings, and FX tabs with scoped filters and review/correction actions |
+| `/settings` | General market profile plus Advanced health, readiness, sensitivity, rebuild, and confirmed CAD/TZS maintenance |
+| `/more` | Mobile hub for Accounts, Categories, Imports, and Settings |
 
-Phase 2 keeps deep exploration on `/insights`; the Dashboard contains only the
-compact summary, unread count, and navigation into that workflow.
+The shared shell resolves market by URL, remembered browser preference,
+`marketProfile`, then All. Mobile navigation is Home, Activity, Insights, More.
 
 The CSS and components preserve responsive layouts, keyboard use,
 reduced-motion behavior, and installable-PWA behavior.
@@ -144,7 +147,7 @@ reduced-motion behavior, and installable-PWA behavior.
 - successful network-first reads for `/api/analytics/balance` and
   `/api/analytics/cashflow`.
 
-Direct navigation to the other five pages is network-only. Net-worth responses
+Direct navigation to all other pages is network-only. Net-worth responses
 are never service-worker cached. The worker also does not cache transaction
 pages, account lists, FX analytics, jobs or job details, uploads or other
 writes, category/proposal data, or import history. API handlers also emit
@@ -162,13 +165,14 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `POST /api/ingest` | Validate, encrypt, store, and enqueue one account's files |
 | `GET /api/jobs` | Filtered/paginated job history |
 | `GET /api/jobs/:id` | Kind-discriminated job state and result |
-| `GET /api/accounts` | Native/base positions, per-card utilization, and aggregate utilization |
-| `POST /api/accounts` | Create an asset or credit-card account |
-| `PATCH /api/accounts/:id` | Edit mutable metadata and optional card limit |
+| `GET /api/accounts` | Optional market-scoped native/reporting positions and utilization |
+| `POST /api/accounts` | Create an account with required `marketCode` |
+| `PATCH /api/accounts/:id` | Edit metadata/market and queue a full refresh after funded market changes |
 | `GET /api/institutions` | List institutions |
 | `POST /api/institutions` | Create an institution |
 | `PATCH /api/institutions/:id` | Rename an institution |
-| `GET /api/transactions` | URL-backed filtering, sorting, paging, three-layer money, nullable CAD valuation, and valuation status |
+| `GET /api/transactions` | Optional market-scoped filtering, reporting-value sorting, paging, and compact conversion indicators |
+| `GET /api/transactions/:id` | Canonical transaction plus structured original/posted/reporting, rate, fee, markup, and balance evidence |
 | `PATCH /api/transactions/:id` | Apply a transaction correction or explicit merchant/flow mapping |
 | `GET /api/categories` | Taxonomy including archive/protection metadata |
 | `POST /api/categories` | Create a taxonomy entry |
@@ -181,8 +185,9 @@ decimal strings. Validation contracts live in `packages/shared-types/src/`.
 | `GET /api/analytics/cashflow` | Inflow/outflow/net plus neutral card-payment series, excluding transfer double counting |
 | `GET /api/analytics/net-worth` | Current included/excluded account valuation and completeness |
 | `GET /api/analytics/fx` | Actual explicit FX fees, bank/reference rates, signed estimated markup, and partial coverage |
-| `GET /api/settings` | Fixed CAD reporting setting |
-| `POST /api/settings/base-currency` | Accept CAD recovery rebuilds; reject non-CAD with `409 base_currency_fixed` |
+| `GET /api/settings` | Active home currency plus nullable market profile |
+| `PATCH /api/settings` | Set or clear market profile without changing reporting |
+| `POST /api/settings/base-currency` | Queue confirmed CAD/TZS maintenance rebuild |
 | `GET /api/insights/summary` | Range totals, MoM/YoY spending, recurring/finding counts, coverage, and latest run |
 | `GET /api/insights/trends` | Monthly series, trailing baselines, MoM/YoY comparisons, movers, and partial coverage |
 | `GET /api/insights/seasonality` | Month-of-year averages/medians or explicit insufficient history |
@@ -207,6 +212,11 @@ truth and add nullable `originalAmount`, `originalCurrency`, `amountBase`,
 `fxRate`, and `fxRateDate`, plus `fxFeeAmountNative`, `isFxFee`, and derived
 `valuationStatus: "valued" | "pending_fx"`. All money and rate values cross the
 API as decimal strings rather than JavaScript numbers.
+
+Omitted `market` means All across accounts, transactions, ordinary analytics,
+FX, and Insights. Unassigned accounts exist only in All. When no analytics
+generation matches the active home currency, Insights returns the structured
+`analytics_rebuilding` maintenance error while accounts and Activity remain usable.
 
 Important server-side files:
 
@@ -312,9 +322,10 @@ checks after structural parsing.
 The Frankfurter provider records the returned rate, source, and actual rate
 date. Only a rate on or before the requested date and no more than seven days
 old is usable. Worker and web reads share the validated
-`FX_MAX_STALENESS_DAYS` setting; startup rejects values outside `0..7`. CAD
-identity rates and historical/current USD/TZS conversions use the same cache
-interface; CI and smoke use fixture providers.
+`FX_MAX_STALENESS_DAYS` setting; startup rejects values outside `0..7`.
+Identity rates for the active CAD/TZS home currency and historical/current
+USD/TZS conversions use the same cache interface; CI and smoke use fixture
+providers.
 
 ## Discriminated Jobs
 
@@ -362,15 +373,18 @@ The completed Phase 1 schema has 12 application tables:
 | `011_tighten_masked_account_references` | Reject full/formatted identifiers and allow only a non-digit masked label plus a 2–6 digit suffix |
 | `012_add_phase2_multicurrency` | Original-money and explicit-fee fields, nullable CAD valuation, Amex backfill, fixed-CAD constraints, and pending-FX index |
 | `013_add_phase2_analytics` | Versioned analytics runs/settings, monthly aggregates/current view, recurring series/occurrences, findings, and atomic generation publication |
+| `014_add_market_scopes` | Nullable legacy account markets, required new-account markets, market profile, scoped aggregate/series/finding identity, and funded reassignment refreshes |
+| `015_add_configurable_home_currency` | CAD/TZS threshold profiles, immutable switch auditing, run/aggregate currency binding, generalized transaction valuation, publication fences, and safe TZS rollback refusal |
 
 Migrations are ordered, forward-applied SQL. Never edit an already-applied
 migration to change production behavior; add the next migration.
 
-The current Phase 2 schema adds six derived-state tables, for 18 application
-tables in total. They are `analytics_run`, `analytics_settings`,
-`analytics_monthly_aggregate`, `recurring_series`, `recurring_occurrence`, and
-`insight_finding`; `analytics_monthly_current` exposes only the generation
-selected by `analytics_settings.published_generation`. The
+The current Phase 2 and separately gated Phase 2.1 schema adds eight tables, for
+20 application tables in total. They are `analytics_run`, `analytics_settings`,
+`analytics_monthly_aggregate`, `recurring_series`, `recurring_occurrence`,
+`insight_finding`, `analytics_threshold_profile`, and
+`home_currency_switch_audit`; `analytics_monthly_current` exposes only the
+generation selected by `analytics_settings.published_generation`. The
 `publish_analytics_generation(uuid, jsonb)` database function completes a run
 and moves the published-generation pointer atomically.
 
@@ -381,7 +395,7 @@ and moves the published-generation pointer atomically.
   never authoritative.
 - Optional original money is immutable merchant evidence. Native amount and
   currency are immutable bank-posted truth. Base amounts, rates, and rate dates
-  are nullable derived CAD reporting values.
+  are nullable derived home-currency reporting values.
 - Original amount/currency are present together and use the posted flow sign.
   An inline FX-fee component is already included in the posted amount; a
   standalone fee remains an independent reconciling transaction.
@@ -414,11 +428,15 @@ and moves the published-generation pointer atomically.
 - Transaction list running balances are calculated for every stable ordered row
   in native and, where possible, base currency; rows on the same date do not
   share an end-of-day balance.
-- CAD is the Phase 2 public reporting currency. A missing eligible rate leaves
-  reporting fields null without blocking native persistence or reconciliation;
-  later FX work updates derived fields only. Internal rebuilds remain for
-  migration/recovery, while non-CAD public switch requests fail with
-  `base_currency_fixed`.
+- Stage 1 reporting remains CAD. Phase 2.1 supports stable CAD or TZS. A switch
+  serializes with ingestion, updates settings/reporting values atomically from
+  immutable native money, leaves missing target rates null, and unpublishes
+  incompatible analytics until a full target-currency run succeeds. Every
+  completed switch records immutable source/target, rate/date, and
+  threshold-policy evidence in `home_currency_switch_audit`.
+- Account market membership is explicit and independent of native/reporting
+  currencies. Legacy null assignments appear only under All; new accounts must
+  be CA or TZ.
 
 ## Categorization Precedence and Privacy
 
@@ -509,8 +527,8 @@ do not use it against an environment whose data must be retained.
 The active Phase 2 smoke contract carries forward the Phase 0 `2855.59` result
 and zero-row repeat import. It adds synthetic separate USD/TZS accounts,
 USD-original/TZS-posted and TZS-original/USD-posted evidence, inline and
-standalone FX fees, fixed-CAD rejection, three-layer transaction and FX
-contracts, analytics refresh, materialized Insights reads, and one durable
+standalone FX fees, three-layer transaction and FX contracts, scoped analytics,
+CAD/TZS maintenance rebuilds, materialized Insights reads, and durable
 finding review. Those synthetic statements complement rather than replace the
 separate I&M Tanzania TZS acceptance. `scripts/phase1_smoke.py` retains the
 historical Phase 1 base-switch flow and supplies reusable helpers, but it is no
@@ -523,18 +541,17 @@ Phase 2 focused suites live in the shared, web, component, browser, and worker
 test trees; CI configuration remains a gate definition, not evidence of the
 current working tree's integrated result.
 
-A 2026-07-24 disposable PostgreSQL checkpoint applied migrations `001`–`013`
-from empty and upgraded Phase 1 data through `012`/`013`. It preserved legacy
-posted/CAD values, backfilled valid Amex original money, proved mixed currency
-constraints fail closed, persisted a pending-CAD TZS transaction with queued FX
-and analytics work, and passed rollback/reapplication of both Phase 2
-migrations. Treat this as migration evidence only, not the complete Phase 2
-release gate.
+A 2026-07-24 disposable PostgreSQL checkpoint applied migrations `001`–`015`
+from empty and upgraded Phase 1 data without changing immutable native truth or
+inferring account markets. It preserved legacy review state, proved scoped
+materialization and market guards, completed a CAD→TZS→CAD round trip with an
+immutable switch audit, fenced publication by active currency, passed
+rollback/reapplication, and refused rollback while TZS was active.
 
 The same date's `make benchmark-analytics` checkpoint loaded exactly 100,000
 synthetic transactions into its disposable database. Full production refresh
-took `8.298s` versus the `120s` limit; the slowest warm materialized read took
-`2.212ms` versus the `1000ms` limit, and the temporary database was removed.
+took `16.385s` versus the `120s` limit; the slowest warm materialized read took
+`1.721ms` versus the `1000ms` limit, and the temporary database was removed.
 
 ## Fixture Status
 
@@ -586,33 +603,37 @@ USD institution adapter is deferred by ADR-0006.
 
 ## Phase 2 Implementation Checkpoint
 
-- ADR-0005 and ADR-0006 are accepted and the Phase 2 build plan is published.
+- ADR-0005 through ADR-0008 are accepted and the Phase 2 build plan is
+  published. ADR-0008 governs a separately gated, not-yet-approved Phase 2.1.
 - Phase 1 is closed and its permanent reconciliation/idempotency gates carry
   forward.
-- Migrations `012`/`013`, three-layer ingestion and persistence, fixed CAD,
-  deferred valuation, generic CSV/XLSX evidence mapping, materialized analytics,
-  durable recurring/finding review state, Insights APIs, `/insights`, and the
-  transaction/Dashboard presentation are implemented in the working tree.
+- Migrations `012`–`015`, three-layer ingestion and persistence, deferred
+  valuation, explicit market membership, market-scoped analytics, generic
+  CSV/XLSX evidence mapping, durable recurring/finding review state, scoped
+  APIs, transaction conversion details, simplified Home/Activity, Insights FX,
+  Settings Advanced, `/more`, and CAD/TZS maintenance reporting are implemented.
 - Incremental refresh recalculates affected monthly aggregate periods and copies
-  unaffected rows; recurrence and findings deliberately remain ledger-wide.
-  Full refresh rebuilds every derived component, and publication is atomic.
+  unaffected rows; recurrence and findings use full source history independently
+  within `ALL`, `CA`, and `TZ`. Full refresh rebuilds every derived component,
+  and publication is atomic and fenced to the active home currency.
 - The active synthetic smoke harness carries forward the golden reconciliation
-  and idempotency gates and exercises fixed CAD, three-layer USD/TZS evidence,
-  explicit FX fees, analytics refresh, Insights reads, and finding review.
+  and idempotency gates and exercises explicit scopes, three-layer USD/TZS
+  evidence, CAD/TZS round trips, explicit FX fees, analytics refresh, Insights
+  reads, and finding review.
 - A uniquely named isolated Compose project rebuilt the current images, applied
-  clean migrations `001`–`013` plus seed, and passed that Phase 2 smoke
+  clean migrations `001`–`015` plus seed, and passed that Phase 2 smoke
   contract. The Phase 0 fixture reconciled to `2855.59` with six inserted rows
   and zero on repeat. The disposable project and volumes were removed; the
   default user stack was untouched.
 - `make check` passes with zero Svelte errors/warnings, Ruff success, and strict
-  mypy success across 32 source/script files. `make test` passes 22 shared, 48
-  web-server, 7 component, 15 Playwright, and 185 worker tests, with 1 intentional
+  mypy success across 32 source/script files. `make test` passes 23 shared, 63
+  web-server, 7 component, 20 Playwright, and 196 worker tests, with 1 intentional
   worker skip. `pnpm build` passes.
 - `im_bank_tz_pdf_v1` and its local acceptance command reconcile all 11
   supplied TZS PDFs exactly (41 transactions, five zero-activity statements),
   and the largest 17-row statement adds zero rows on repeat. Its end-to-end
   encrypted upload also passes through web, object storage, worker, PostgreSQL,
-  CAD valuation, and Insights coverage.
+  home-currency valuation, and Insights coverage.
 - The database, benchmark, fresh-stack, and TZS real-bank results complete the
   non-deferred acceptance checkpoint. Phase 2 is `in_review`; it must not be
   marked completed until review is approved.

@@ -72,7 +72,9 @@ scope baseline.
 - Requiring reporting valuation during import coupled native ledger acceptance
   too tightly to external FX availability.
 - Switchable public base currency complicated consistent longitudinal
-  analytics; Phase 2 fixes the reporting lens to CAD.
+  analytics; Phase 2 Stage 1 fixed the reporting lens to CAD. ADR-0008 later
+  replaces only that fixed-CAD clause with a separately gated, confirmed
+  CAD/TZS maintenance workflow.
 - Synthetic TZS/USD fixtures prove protocol and arithmetic behavior but cannot
   prove compatibility with real institution export layouts.
 
@@ -80,7 +82,8 @@ scope baseline.
 
 - ADR-0003 and ADR-0004 remain the Phase 1 decisions.
 - ADR-0005 begins Phase 2 with three-layer monetary truth, deferred CAD
-  valuation, and deterministic materialized insights.
+  valuation, and deterministic materialized insights. ADR-0008 later supersedes
+  only its fixed-CAD clause and ADR-0004's public-switching semantics.
 - The golden `2855.59` closing balance and zero-row repeat import remain
   permanent regression gates.
 - The initial carry-forward required sanitized real TZS and USD institution
@@ -98,13 +101,28 @@ institution-specific TZS/USD export was supplied or accepted during Phase 1.
 
 The active sequenced backlog, exact behavioral criteria, performance targets,
 and review state live in
-[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). Phase 2 is `in_review`: its code,
-migrations, contracts, UI, tests, documentation, and accepted TZS real-bank
-evidence agree. The three-layer and materialized-Insights implementation is
-present, the disposable 100,000-transaction performance threshold has passed,
-and the complete automated synthetic checkpoint passes static checks, tests,
-production build, database migration/upgrade, and a uniquely named isolated
-fresh-stack run on rebuilt images and clean migrations/seed.
+[PHASE-2-BUILD-PLAN.md](PHASE-2-BUILD-PLAN.md). Phase 2 is `in_review` after the
+ADR-0007 market-scoped UX remediation passed its expanded gates. ADR-0008's
+CAD/TZS home-currency implementation is present and verified, but Phase 2.1
+remains a separate, unapproved gate and does not become approved with Phase 2.
+
+The final automated checkpoint passes `make check`, with zero Svelte errors or
+warnings plus Ruff and strict mypy, and `make test`, with 23 shared-contract, 63
+web-server, 7 component, 20 Playwright, and 196 worker tests plus 1 intentional
+worker skip. The production web build also passes. Disposable PostgreSQL
+acceptance applies all 15 migrations (`001`–`015`) and covers the Phase 1
+upgrade, market assignment/profile behavior, scoped analytics identity,
+currency-fenced publication, the immutable home-currency switch audit, and safe
+rollback behavior.
+
+The disposable 100,000-transaction production analytics rebuild completes in
+`16.385s` against the `120s` limit; its slowest warmed materialized read is
+`1.721ms` against the `1000ms` limit. A uniquely named clean Compose stack also
+rebuilt the current images, applied all migrations plus the idempotent seed, and
+passed the active smoke contract, including the `2855.59` closing balance,
+zero-row repeat ingestion, All/Canada/Tanzania scopes, and CAD/TZS
+home-currency maintenance. Its disposable project and volumes were removed
+without touching the default user stack.
 
 The real-bank checkpoint parses all 11 supplied sanitized I&M Tanzania TZS
 image-PDF statements through `im_bank_tz_pdf_v1`: all reconcile exactly, with
@@ -112,6 +130,5 @@ image-PDF statements through `im_bank_tz_pdf_v1`: all reconcile exactly, with
 the largest 17-row statement is repeated. Its local OCR values are independently
 checked against running balances, printed totals, and closing balances. ADR-0006
 defers a named USD institution adapter; generic USD behavior remains covered by
-the deterministic synthetic suite. The disposable projects were removed
-without touching the default user stack. No Phase 2 retrospective or closure
-section should be written until review is approved.
+the deterministic synthetic suite. No Phase 2 retrospective or closure section
+should be written until review is approved.

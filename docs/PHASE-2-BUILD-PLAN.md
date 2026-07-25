@@ -8,7 +8,7 @@ Jira Epic: N/A
 
 Phase 2 makes multi-currency ledger truth explicit and adds deterministic,
 reviewable insights. Transactions preserve original purchase evidence, exact
-account-posted values, and a nullable CAD reporting valuation. The application
+account-posted values, and a nullable reporting valuation. The application
 then materializes trends, seasonality, recurring activity, renewals, price
 changes, anomalies, duplicates, reconciliation issues, coverage gaps, and
 pending-FX findings without delegating arithmetic or detection to an LLM.
@@ -16,11 +16,18 @@ pending-FX findings without delegating arithmetic or detection to an LLM.
 ## Governing Decisions
 
 - [ADR-0005](decisions/0005-three-layer-money-and-materialized-insights.md)
-  defines the three monetary layers, fixed CAD reporting, deferred valuation,
-  deterministic materialization, and durable finding review state.
+  defines the three monetary layers, Stage 1 fixed-CAD reporting, deferred
+  valuation, deterministic materialization, and durable finding review state.
+  ADR-0008 supersedes only its fixed-CAD clause for Phase 2.1.
 - [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md)
   defines the bounded local-OCR acceptance path for the supplied I&M Tanzania
   TZS statements and defers a named USD institution adapter.
+- [ADR-0007](decisions/0007-market-scopes-and-progressive-disclosure.md)
+  keeps one product and engine, adds explicit account market membership and a
+  separate market profile, and defines fixed-CAD Stage 1 scope math.
+- [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md)
+  defines the separately gated Phase 2.1 CAD/TZS home-currency rebuild and
+  currency-fenced analytics rules.
 - Accounts remain single-currency. Separate TZS and USD balances at one bank
   are separate ledger accounts.
 - Forecasting, natural-language querying, outbound notifications,
@@ -66,24 +73,35 @@ pending-FX findings without delegating arithmetic or detection to an LLM.
     all regression/performance/fresh-stack gates, update the handoff, and move
     the phase to review. A named USD institution adapter is deferred by
     ADR-0006 while generic USD behavior remains covered.
+13. Remediate review feedback with All/Canada/Tanzania scopes, scope-bearing
+    analytics, progressive transaction disclosure, a three-section Home,
+    Insights FX, Advanced operational controls, and four-item mobile navigation.
+14. Gate Phase 2.1 separately: rebuild CAD/TZS reporting exclusively from
+    immutable native money, freeze per-currency materiality thresholds, and
+    publish only matching-currency analytics generations.
 
 ## Current Implementation Checkpoint
 
-Backlog items 1–11 have implementation in the working tree: migrations `012`
-and `013`, three-layer transaction persistence and Amex backfill, fixed CAD and
-deferred FX behavior, deterministic/learned tabular evidence mapping, the
-materialized analytics engine, shared/API contracts, `/insights`, the amount
-stack, and Dashboard integration. Conventional XLSX files have a deterministic
-`generic_xlsx_v1` adapter that reuses the generic CSV table rules; this is not a
-named institution adapter and does not satisfy real-bank acceptance.
+Backlog items 1–14 have implementation in the working tree. Migrations
+`012`–`015` cover three-layer transaction persistence and Amex backfill,
+deferred valuation, materialized analytics, explicit market membership and
+scope identity, frozen threshold profiles, and currency-fenced CAD/TZS home
+reporting. The shared/API contracts and application now include scoped reads,
+canonical transaction conversion details, the simplified Home and Activity
+experiences, Insights FX, Settings Advanced, and `/more`. Conventional XLSX
+files retain the deterministic `generic_xlsx_v1` adapter that reuses the generic
+CSV table rules; this is not a named institution adapter and does not satisfy
+real-bank acceptance.
 
 Incremental `analytics_refresh` runs detect transaction months changed since
 the previous published source watermark, recompute all aggregate dimensions for
 those months, and copy unaffected monthly rows into the next generation.
-Recurring series and findings are recomputed over the full ledger in both modes
-because their evidence can cross month boundaries. Full mode recomputes all
-monthly periods plus those ledger-wide detectors. Either mode publishes one
-generation atomically and reports the affected-period list in its job result.
+Recurring series and findings are recomputed from full source history
+independently within `ALL`, `CA`, and `TZ` in both modes because their evidence
+can cross month boundaries. Full mode recomputes all monthly periods plus those
+scoped detectors. Either mode publishes one home-currency- and
+threshold-policy-bound generation atomically and reports the affected-period
+list in its job result.
 
 Backlog item 12 is now implemented for the supplied I&M Tanzania TZS layout.
 The versioned `im_bank_tz_pdf_v1` adapter uses bounded local Tesseract OCR and
@@ -95,32 +113,31 @@ statements, and a 17-row statement that adds zero rows on repeat. The same
 named USD adapter is deliberately deferred under ADR-0006 and is not a review
 or completion blocker.
 
-A disposable database checkpoint has applied migrations `001`–`013` from
-empty, upgraded Phase 1 rows without changing posted or CAD amounts, backfilled
-valid Amex original-money evidence, exercised the account/statement/transaction
-currency constraints and pending-CAD TZS job path, and rolled back/reapplied
-`012`/`013`. This satisfies a migration checkpoint only; it does not replace the
-full release gates below.
+A disposable database checkpoint applied migrations `001`–`015` from empty and
+upgraded Phase 1 rows without changing immutable native truth or inferring
+markets. It preserved legacy review state, exercised market-scope guards and
+materialization, proved CAD→TZS→CAD rebuilding and switch auditing, fenced
+publication by active currency, passed rollback/reapplication, and refused
+rollback while TZS was active.
 
-The checked-in `make benchmark-analytics` disposable benchmark has also passed
-with exactly 100,000 synthetic transactions: the production full refresh took
-`8.298s` (limit `120s`) and the slowest warm materialized read took `2.212ms`
-(limit `1000ms`) before cleaning up its temporary database. This satisfies the
-stated performance threshold, not the real-bank gate.
+The checked-in `make benchmark-analytics` disposable benchmark passed with
+exactly 100,000 synthetic transactions: the production full refresh took
+`16.385s` (limit `120s`) and the slowest warm materialized read took `1.721ms`
+(limit `1000ms`) before cleaning up its temporary database.
 
-The final automated synthetic verification checkpoint also passes `make check`
+The final automated synthetic verification checkpoint passes `make check`
 (Svelte zero errors/warnings, Ruff, strict mypy across 32 source/script files),
-`make test` (22 shared, 48 web-server, 7 component, 15 Playwright, and 185
-worker tests, plus 1 intentional worker skip), and `pnpm build`. The disposable
-PostgreSQL checkpoint passes as described above. A final isolated Compose rerun rebuilt
-the current images, applied clean migrations `001`–`013` plus seed, reconciled
-the Phase 0 six-row statement to `2855.59` with zero rows on repeat, and passed
-the synthetic Phase 2 USD/TZS, three-layer, fixed-CAD, FX-evidence, analytics,
-and Insights-review smoke contract. The named disposable project and volumes
-were removed without touching the default user stack. Together with the real
-TZS acceptance evidence above, these results advance Phase 2 to `in_review`.
-Closure still requires review approval; no Phase 2 retrospective is recorded
-yet.
+`make test` (23 shared, 63 web-server, 7 component, 20 Playwright, and 196
+worker tests, plus 1 intentional worker skip), and `pnpm build`. A final isolated
+Compose rerun rebuilt the current images, applied clean migrations `001`–`015`
+plus seed, reconciled the Phase 0 six-row statement to `2855.59` with zero rows
+on repeat, and passed explicit market scopes, USD/TZS three-layer evidence,
+CAD/TZS round trips, FX evidence, analytics, and Insights review. The named
+disposable project and volumes were removed without touching the default user
+stack. Together with the real TZS acceptance evidence above, these results
+return Phase 2 to `in_review`. Phase 2.1 implementation remains separately
+unapproved; no Phase 2 retrospective is recorded until Phase 2 review is
+approved.
 
 ## Public Interfaces
 
@@ -141,6 +158,14 @@ Phase 2 adds:
 - `GET /api/insights/settings`
 - `PATCH /api/insights/settings`
 - `POST /api/insights/rebuild`
+- `GET /api/transactions/:id`
+- `PATCH /api/settings`
+- `POST /api/settings/base-currency`
+
+Accounts, transactions, ordinary analytics, FX, and all Insights reads accept
+an optional `market=CA|TZ`; omission means All. Account create/read/update
+contracts expose `marketCode`, settings expose nullable `marketProfile`, and
+account plus market filters are conjunctive.
 
 The range default is 12 months; supported presets are 3, 6, 12, 24, and all
 history. List endpoints validate applicable date, account, category, merchant,
@@ -156,9 +181,9 @@ values remain exact decimal strings.
 - `amount_native` and `currency_native` remain immutable account-posted truth;
   reconciliation and deduplication do not depend on later original/FX/analytics
   enrichment.
-- CAD is the only public reporting currency. A non-CAD switch request returns
-  `409 base_currency_fixed`, while internal recovery rebuilds remain possible.
-- Missing eligible CAD rates do not block native persistence or reconciliation.
+- Stage 1 keeps CAD as the public reporting currency. Phase 2.1 permits only
+  CAD or TZS through a confirmed Advanced maintenance action.
+- Missing eligible reporting rates do not block native persistence or reconciliation.
   Affected rows report `pending_fx`, analytics become explicitly partial, and a
   later refresh fills only derived reporting fields.
 - Rates use booked date or a nearest-prior date no more than seven days old;
@@ -180,12 +205,16 @@ values remain exact decimal strings.
   windows; it requires three occurrences except that annual candidates may use
   two. Transfers and card payments are excluded from spending series. Expected
   next dates and overdue state are recurrence metadata, not forecasting.
-- Price-increase findings require at least 5% and CAD 1 (or the equivalent
-  comparison basis) by default and compare the newest amount with the prior
-  stable median after removing an explicit inline fee.
+- Price-increase findings require at least 5% and the active frozen profile's
+  reporting-money floor. The seeded CAD `materiality-v1` floor is CAD `1.00`;
+  the first TZS switch creates and persists its exact dated converted floor.
+  Detection compares the newest amount with the prior stable median after
+  removing an explicit inline fee.
 - Balanced anomaly detection uses modified z-score `>= 3.5`, at least five
-  prior comparable observations, and at least CAD 10 material difference;
-  low/high sensitivity use `5.0`/CAD 25 and `2.5`/CAD 5. An interquartile-range
+  prior comparable observations, and the active frozen profile's balanced
+  floor. The seeded CAD `materiality-v1` low/balanced/high floors are CAD
+  `25.00`/`10.00`/`5.00`; the first TZS switch converts and freezes their exact
+  counterparts under the seven-day staleness rule. An interquartile-range
   fallback handles zero median absolute deviation.
 - Near-duplicates require distinct transaction identities with the same
   account, merchant, posted currency, and absolute posted amount within three
@@ -196,6 +225,24 @@ values remain exact decimal strings.
   survive refreshes.
 - Readers see only an atomically published analytics snapshot. Run status,
   source watermark, counts, duration, and errors remain inspectable.
+- Every analytics generation, aggregate, finding fingerprint, and evidence set
+  is bound to its home currency and frozen threshold-policy version. Without a
+  matching published generation, Insights returns `analytics_rebuilding` while
+  ledger and account reads remain available.
+
+### Market scopes
+
+- Existing accounts upgrade with `market_code = NULL`; no value is inferred
+  from currency or institution. New accounts require `CA` or `TZ`.
+- All contains every account, including unassigned accounts. Canada/Tanzania
+  include only explicitly assigned accounts, including foreign-currency accounts.
+- Account and market filters are conjunctive. A scope change clears a selected
+  account that is absent from the new scope.
+- All, CA, and TZ monthly aggregates, recurring series, and findings are built
+  from their scoped source transactions. Scope participates in fingerprints
+  and durable review state.
+- Resolution order is URL, remembered browser preference, `marketProfile`, then
+  All. User scope changes update both URL and browser storage.
 
 ### Interfaces and experience
 
@@ -204,8 +251,15 @@ values remain exact decimal strings.
   and `valuationStatus`; all monetary values remain exact decimal strings.
 - Insight list APIs validate supported date, account, category, merchant, type,
   status, severity, and pagination filters.
-- The amount stack omits duplicate layers, labels original/posted/reporting
-  values, and displays “CAD valuation pending” when required.
+- Activity rows show only the account-posted amount. `FX`, `Converted`, and
+  `Pending` indicators open a keyboard-accessible responsive audit drawer with
+  original/posted/reporting money, rates, fees, markup, and both balances.
+- Home contains only scoped reporting net worth, scoped native account balances,
+  and recent posted activity. Balance/cash-flow and aggregate FX move to
+  Insights; operational health, sensitivity, and rebuild controls move to
+  Settings Advanced.
+- Mobile navigation is Home, Activity, Insights, More. `/more` links Accounts,
+  Categories, Imports, and Settings. Imports uses the active market scope.
 - `/insights` and its evidence/review controls work with keyboard navigation,
   responsive layouts, and reduced motion. Findings remain in-app only.
 
@@ -221,6 +275,12 @@ values remain exact decimal strings.
 - Cover USD-original/TZS-posted, TZS-original/USD-posted, CAD-native, refunds,
   inline fees, standalone fee rows, malformed pairs, mixed-currency rejection,
   missing rates, and later FX backfill.
+- Cover unassigned All-only accounts, explicit TZ USD accounts, scoped totals
+  and pagination, every analytics dimension, recurring/finding isolation,
+  scope-safe offline keys, URL/browser persistence, and stale account filters.
+- Cover CAD→TZS→CAD, identity and missing rates, no stale reporting-value reuse,
+  advisory-lock serialization, matching-currency publication, frozen thresholds,
+  recurring override conversion, maintenance state, and stale-run rejection.
 - On a synthetic 100,000-transaction ledger, warm materialized insight reads
   complete within one second and a full local rebuild within two minutes;
   incremental refresh touches only affected entities and periods.
@@ -239,5 +299,6 @@ OCR-text derivatives provide CI-safe parser regression coverage. Generic USD
 ledger behavior remains tested, but institution-specific USD statement support
 is deferred until a sanitized sample is supplied and explicitly scheduled.
 
-Phase 2 is `in_review`, not completed. Closure requires user review approval
-and a final confirmation that the documented non-deferred gates remain green.
+ADR-0007 review remediation and every expanded gate above have passed, so
+Phase 2 is `in_review`. ADR-0008's Phase 2.1 implementation is present but
+remains a separate, unapproved gate that begins only after Phase 2 approval.

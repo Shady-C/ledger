@@ -4,6 +4,14 @@
 **Status:** Accepted
 **Jira:** N/A
 
+> Partial supersession note:
+> [ADR-0008](0008-configurable-cad-tzs-home-currency.md) supersedes only this
+> ADR's fixed-CAD clause and the related public-switching semantics inherited
+> from ADR-0004. The original, posted, and reporting money layers; deferred
+> valuation; deterministic materialization; and durable review-state decisions
+> remain accepted. The decision below is preserved as the historical Stage 1
+> record.
+
 ## Context
 
 Phase 1 stores the bank-posted amount and a derived reporting amount, while

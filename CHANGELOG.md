@@ -6,9 +6,26 @@ All notable changes to Ledger are documented here.
 
 ### Added
 
-- [ADR-0005] Three-layer original/posted/CAD monetary truth, fixed public CAD
-  reporting, deferred FX valuation, and deterministic materialized analytics
-  with durable reviewed findings.
+- [ADR-0007] Explicit Canada/Tanzania account scopes, a separate market
+  profile, market-scoped analytics, and progressive transaction disclosure.
+- [ADR-0008] Separately gated Phase 2.1 support for stable CAD/TZS home
+  reporting with direct native recomputation, currency-fenced analytics
+  publication, and frozen threshold profiles. Its implementation is present;
+  approval remains separate from Phase 2.
+- Ordered migrations `014` and `015` for explicit account markets, the market
+  profile, scoped analytics identity, CAD/TZS threshold profiles, generalized
+  reporting values, immutable home-currency switch auditing, currency-fenced
+  publication, and refusal to roll back while TZS is active.
+- Optional market filters across accounts, transactions, ordinary analytics,
+  FX, and Insights, plus canonical transaction-detail conversion evidence.
+- A shared All/Canada/Tanzania selector, single-amount Activity rows, responsive
+  conversion drawer, simplified Home, Insights FX, Settings Advanced, `/more`,
+  and four-item mobile navigation.
+
+- [ADR-0005] Three-layer original/posted/reporting monetary truth, Stage 1 fixed
+  public CAD reporting, deferred FX valuation, and deterministic materialized
+  analytics with durable reviewed findings. ADR-0008 supersedes only the
+  fixed-CAD clause for Phase 2.1.
 - [ADR-0006] Versioned, bounded local-OCR acceptance for the supplied I&M Bank
   Tanzania TZS image-PDF layout, with institution-specific USD statements
   explicitly deferred.
@@ -26,7 +43,8 @@ All notable changes to Ledger are documented here.
   standalone FX-fee evidence.
 - An active synthetic Phase 2 smoke harness carrying forward the `2855.59` and
   zero-row repeat gates while covering separate USD/TZS accounts, three-layer
-  money, fixed CAD, explicit FX fees, analytics refresh, and Insights review.
+  money, explicit market scopes, CAD/TZS maintenance round trips, explicit FX
+  fees, analytics refresh, and Insights review.
 - The `im_bank_tz_pdf_v1` adapter, sanitized OCR-text regression fixtures, and
   `make im-bank-tz-acceptance` gate. The adapter cross-checks each local OCR
   amount with running-balance movement, printed totals, and the closing balance
@@ -34,16 +52,22 @@ All notable changes to Ledger are documented here.
 
 ### Changed
 
+- Reopened Phase 2 for ADR-0007 review remediation while keeping one repository,
+  ledger, ingestion pipeline, and deterministic analytics engine, then returned
+  it to `in_review` after the expanded gates passed.
+- Moved balance/cash-flow exploration into Insights and analytics health,
+  sensitivity, readiness, and rebuild controls into Settings Advanced.
 - Advanced the active project phase to Phase 2, accepted the supplied I&M
   Tanzania TZS statements as its real-bank evidence, and deferred a named USD
   institution adapter under ADR-0006.
 - Extended transaction ingestion and response contracts with original money,
-  explicit FX-fee evidence, nullable CAD valuation, and `pending_fx`; fixed
-  public reporting to CAD while retaining internal recovery rebuild machinery.
+  explicit FX-fee evidence, nullable reporting valuation, and `pending_fx`.
+  Stage 1 fixed public reporting to CAD; ADR-0008 now governs the separate
+  CAD/TZS maintenance workflow.
 - Made incremental analytics refreshes rebuild changed monthly aggregate
-  periods and copy unaffected rows, while keeping recurrence and finding
-  detection ledger-wide; full and incremental runs both publish atomically and
-  expose their affected periods.
+  periods and copy unaffected rows, while recomputing recurrence and findings
+  from full source history independently within `ALL`, `CA`, and `TZ`; full and
+  incremental runs both publish atomically and expose their affected periods.
 - Accepted RFC 3339 UTC-offset source watermarks in analytics job results so
   completed PostgreSQL-backed refreshes remain readable through the jobs API.
 - Added Tesseract to the worker image for the named I&M Tanzania adapter and
@@ -59,25 +83,24 @@ All notable changes to Ledger are documented here.
 
 ### Verification checkpoint
 
-- A disposable PostgreSQL run applied migrations `001`–`013` from empty and
-  upgraded a Phase 1 database through `012`/`013`. The upgrade preserved legacy
-  posted/CAD values, backfilled valid Amex `foreign_spend`, rejected mixed
-  account/statement/transaction currencies with constraint errors, persisted a
-  pending-CAD TZS row while queuing FX and analytics work, and passed rollback
-  plus reapplication of the two Phase 2 migrations. This is migration evidence,
-  not complete Phase 2 release acceptance.
+- A disposable PostgreSQL run applied migrations `001`–`015` from empty and
+  upgraded Phase 1 data without changing immutable native truth or inferring
+  markets. It preserved legacy finding review state, exercised scoped
+  materialization and market guards, proved CAD→TZS→CAD rebuilding and immutable
+  switch auditing, fenced publication by active currency, passed
+  rollback/reapplication, and refused rollback while TZS was active.
 - `make benchmark-analytics` populated a disposable migrated database with
   exactly 100,000 synthetic transactions. The production full refresh completed
-  in `8.298s` (limit `120s`) and its slowest warm materialized read in `2.212ms`
+  in `16.385s` (limit `120s`) and its slowest warm materialized read in `1.721ms`
   (limit `1000ms`), then removed the temporary database.
 - A uniquely named disposable fresh stack passed the active Phase 2 `make
-  smoke` contract on rebuilt images and clean migrations `001`–`013` plus seed:
+  smoke` contract on rebuilt images and clean migrations `001`–`015` plus seed:
   the Phase 0 fixture reconciled to `2855.59` with six rows and zero on repeat;
-  synthetic USD/TZS accounts covered both original/posted directions,
-  fixed-CAD rejection, explicit FX evidence, analytics refresh, materialized
-  Insights reads, and durable finding review. The named Compose project and
-  volumes were removed without touching the default user stack. This is
-  synthetic integration evidence and complements the separate real-bank gate.
+  synthetic USD/TZS accounts covered explicit market scopes, both
+  original/posted directions, CAD/TZS round trips, explicit FX evidence,
+  analytics refresh, materialized Insights reads, and durable finding review.
+  The named Compose project and volumes were removed without touching the
+  default user stack. This synthetic evidence complements the real-bank gate.
 - All 11 supplied sanitized I&M Tanzania TZS image-PDF statements matched
   `im_bank_tz_pdf_v1` and reconciled exactly, representing 41 transactions and
   five valid zero-activity statements. The largest 17-row statement added zero
@@ -87,7 +110,7 @@ All notable changes to Ledger are documented here.
   17 rows, and added zero rows on repeat; the disposable project was removed.
 - The final automated checkpoint passed `make check` with zero Svelte
   errors/warnings, Ruff, and strict mypy across 32 source/script files; `make
-  test` with 22 shared, 48 web-server, 7 component, 15 Playwright, and 185
+  test` with 23 shared, 63 web-server, 7 component, 20 Playwright, and 196
   worker tests plus 1 intentional worker skip; and the `pnpm build` production
   build.
   With the real TZS gate accepted and named USD support deferred by ADR-0006,

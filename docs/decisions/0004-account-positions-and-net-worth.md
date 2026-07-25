@@ -4,9 +4,13 @@
 **Status:** Accepted
 **Jira:** N/A
 
-> Phase 2 note: [ADR-0005](0005-three-layer-money-and-materialized-insights.md)
-> supersedes only this ADR's public base-currency switchability. Native-balance,
-> liability, utilization, and net-worth semantics remain accepted.
+> Historical supersession note:
+> [ADR-0005](0005-three-layer-money-and-materialized-insights.md) first
+> superseded this ADR's public base-currency switchability by fixing CAD for the
+> Phase 2 reporting lens. [ADR-0008](0008-configurable-cad-tzs-home-currency.md)
+> later supersedes only those public-switching semantics with a confirmed,
+> maintenance-gated CAD/TZS home-currency change. Native-balance, liability,
+> utilization, and net-worth semantics remain accepted.
 
 ## Context
 
