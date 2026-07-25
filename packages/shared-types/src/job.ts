@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { decimalStringSchema, isoDateSchema, uuidSchema } from './primitives.js';
+import { homeCurrencySchema } from './settings.js';
 
 export const jobStatusSchema = z.enum(['queued', 'claimed', 'done', 'failed', 'needs_ai']);
 export const jobKindSchema = z.enum([
@@ -89,22 +90,26 @@ export const categorizeJobResultSchema = z.object({
 });
 
 export const fxRefreshJobResultSchema = z.object({
-  baseCurrency: z.string().regex(/^[A-Z]{3}$/),
+  baseCurrency: homeCurrencySchema,
   quoteCurrencies: z.array(z.string().regex(/^[A-Z]{3}$/)),
   ratesStored: z.number().int().nonnegative(),
-  transactionsUpdated: z.number().int().nonnegative()
+  transactionsUpdated: z.number().int().nonnegative(),
+  unavailableRateCount: z.number().int().nonnegative().optional()
 });
 
 export const baseCurrencyRebuildJobResultSchema = z.object({
-  previousBaseCurrency: z.string().regex(/^[A-Z]{3}$/),
-  targetBaseCurrency: z.string().regex(/^[A-Z]{3}$/),
+  previousBaseCurrency: homeCurrencySchema,
+  targetBaseCurrency: homeCurrencySchema,
   transactionsUpdated: z.number().int().nonnegative(),
-  settingsUpdated: z.boolean()
+  settingsUpdated: z.boolean(),
+  pendingRateCount: z.number().int().nonnegative().optional()
 });
 
 export const analyticsRefreshJobResultSchema = z.object({
   generation: z.number().int().positive(),
   mode: z.enum(['full', 'incremental']),
+  baseCurrency: z.enum(['CAD', 'TZS']),
+  thresholdPolicyVersion: z.string().min(1),
   sourceWatermark: z.string().datetime({ offset: true }).nullable(),
   aggregateCount: z.number().int().nonnegative(),
   recurringSeriesCount: z.number().int().nonnegative(),
@@ -169,22 +174,26 @@ export const workerCategorizeJobResultSchema = z.object({
 });
 
 export const workerFxRefreshJobResultSchema = z.object({
-  base_currency: z.string().regex(/^[A-Z]{3}$/),
+  base_currency: homeCurrencySchema,
   quote_currencies: z.array(z.string().regex(/^[A-Z]{3}$/)),
   rates_stored: z.number().int().nonnegative(),
-  transactions_updated: z.number().int().nonnegative()
+  transactions_updated: z.number().int().nonnegative(),
+  unavailable_rate_count: z.number().int().nonnegative().optional()
 });
 
 export const workerBaseCurrencyRebuildJobResultSchema = z.object({
-  previous_base_currency: z.string().regex(/^[A-Z]{3}$/),
-  target_base_currency: z.string().regex(/^[A-Z]{3}$/),
+  previous_base_currency: homeCurrencySchema,
+  target_base_currency: homeCurrencySchema,
   transactions_updated: z.number().int().nonnegative(),
-  settings_updated: z.boolean()
+  settings_updated: z.boolean(),
+  pending_rate_count: z.number().int().nonnegative().optional()
 });
 
 export const workerAnalyticsRefreshJobResultSchema = z.object({
   generation: z.number().int().positive(),
   mode: z.enum(['full', 'incremental']),
+  base_currency: z.enum(['CAD', 'TZS']),
+  threshold_policy_version: z.string().min(1),
   source_watermark: z.string().datetime({ offset: true }).nullable(),
   aggregate_count: z.number().int().nonnegative(),
   recurring_series_count: z.number().int().nonnegative(),

@@ -7,6 +7,7 @@ import {
   positiveDecimalStringSchema,
   uuidSchema
 } from './primitives.js';
+import { optionalMarketQuerySchema } from './market.js';
 
 const emptyStringToUndefined = (value: unknown) =>
   value === '' || value === null ? undefined : value;
@@ -88,7 +89,8 @@ const insightBaseQueryShape = {
   to: optionalDate,
   accountId: optionalUuid,
   categoryId: optionalUuid,
-  merchantId: optionalUuid
+  merchantId: optionalUuid,
+  market: optionalMarketQuerySchema
 };
 
 export const insightSummaryQuerySchema = dateRangeRefinement(insightBaseQueryShape, {
@@ -165,6 +167,8 @@ export const analyticsRunSchema = z.object({
   id: uuidSchema,
   status: analyticsRunStatusSchema,
   mode: z.enum(['incremental', 'full']),
+  baseCurrency: currencyCodeSchema,
+  thresholdPolicyVersion: z.string().min(1),
   sourceWatermark: z.string().datetime().nullable(),
   affectedPeriodCount: z.number().int().nonnegative(),
   aggregateCount: z.number().int().nonnegative(),
@@ -199,7 +203,7 @@ export const insightFindingCountsSchema = z.object({
 });
 
 export const insightSummaryResponseSchema = z.object({
-  baseCurrency: z.literal('CAD'),
+  baseCurrency: currencyCodeSchema,
   range: insightDateRangeSchema,
   coverage: insightCoverageSchema,
   totals: insightTotalsSchema,
@@ -242,7 +246,7 @@ export const insightMoverSchema = z.object({
 });
 
 export const insightTrendsResponseSchema = z.object({
-  baseCurrency: z.literal('CAD'),
+  baseCurrency: currencyCodeSchema,
   range: insightDateRangeSchema,
   groupBy: insightDimensionSchema,
   coverage: insightCoverageSchema,
@@ -259,7 +263,7 @@ export const seasonalityMonthSchema = z.object({
 });
 
 export const insightSeasonalityResponseSchema = z.object({
-  baseCurrency: z.literal('CAD'),
+  baseCurrency: currencyCodeSchema,
   range: insightDateRangeSchema,
   status: z.enum(['available', 'insufficient_history']),
   historyMonths: z.number().int().nonnegative(),
@@ -302,7 +306,7 @@ export const recurringSeriesSchema = z.object({
 export const recurringSeriesResponseSchema = z.object({ series: recurringSeriesSchema });
 
 export const insightRecurringResponseSchema = z.object({
-  baseCurrency: z.literal('CAD'),
+  baseCurrency: currencyCodeSchema,
   range: insightDateRangeSchema,
   series: z.array(recurringSeriesSchema),
   page: z.number().int().positive(),
@@ -335,6 +339,7 @@ export const insightFindingSchema = z.object({
 export const insightFindingResponseSchema = z.object({ finding: insightFindingSchema });
 
 export const insightFindingsResponseSchema = z.object({
+  baseCurrency: currencyCodeSchema,
   findings: z.array(insightFindingSchema),
   page: z.number().int().positive(),
   pageSize: z.number().int().positive(),

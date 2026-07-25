@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { workerIngestResultSchema } from '../src/index.js';
+import {
+  baseCurrencyRebuildJobResultSchema,
+  fxRefreshJobResultSchema,
+  workerBaseCurrencyRebuildJobResultSchema,
+  workerFxRefreshJobResultSchema,
+  workerIngestResultSchema
+} from '../src/index.js';
 
 describe('workerIngestResultSchema', () => {
   it('retains every per-file reconciliation value', () => {
@@ -86,5 +92,34 @@ describe('workerIngestResultSchema', () => {
       ]
     });
     expect(parsed.files[0]?.reconcile).toBeNull();
+  });
+});
+
+describe('home-currency maintenance results', () => {
+  it('rejects unsupported reporting currencies in public and worker results', () => {
+    expect(fxRefreshJobResultSchema.safeParse({
+      baseCurrency: 'USD',
+      quoteCurrencies: [],
+      ratesStored: 0,
+      transactionsUpdated: 0
+    }).success).toBe(false);
+    expect(workerFxRefreshJobResultSchema.safeParse({
+      base_currency: 'USD',
+      quote_currencies: [],
+      rates_stored: 0,
+      transactions_updated: 0
+    }).success).toBe(false);
+    expect(baseCurrencyRebuildJobResultSchema.safeParse({
+      previousBaseCurrency: 'CAD',
+      targetBaseCurrency: 'USD',
+      transactionsUpdated: 0,
+      settingsUpdated: true
+    }).success).toBe(false);
+    expect(workerBaseCurrencyRebuildJobResultSchema.safeParse({
+      previous_base_currency: 'USD',
+      target_base_currency: 'TZS',
+      transactions_updated: 0,
+      settings_updated: true
+    }).success).toBe(false);
   });
 });

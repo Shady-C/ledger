@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { isoDateSchema, uuidSchema } from './primitives.js';
+import { optionalMarketQuerySchema } from './market.js';
 import { transactionDirectionSchema } from './transaction.js';
 
 const emptyStringToUndefined = (value: unknown) => (value === '' || value === null ? undefined : value);
@@ -19,6 +20,7 @@ export const transactionSortSchema = z.enum([
 export const transactionQuerySchema = z
   .object({
     accountId: optionalUuid,
+    market: optionalMarketQuerySchema,
     categoryId: optionalUuid,
     direction: optionalDirection,
     from: optionalDate,
@@ -65,6 +67,7 @@ export const jobQuerySchema = z
 export const analyticsQuerySchema = z
   .object({
     accountId: optionalUuid,
+    market: optionalMarketQuerySchema,
     from: optionalDate,
     to: optionalDate
   })

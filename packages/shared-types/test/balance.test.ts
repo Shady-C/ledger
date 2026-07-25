@@ -9,6 +9,7 @@ const account = {
   institutionName: 'American Express',
   kind: 'credit_card',
   nativeCurrency: 'CAD',
+  marketCode: 'CA',
   accountRefMasked: '••••1001',
   currentBalance: '129.30',
   currentBalanceBase: '129.30',

@@ -7,6 +7,7 @@ import {
   categorizationProposalSchema,
   jobResponseSchema,
   netWorthResponseSchema,
+  settingsPatchSchema,
   transactionCategoryPatchSchema
 } from '../src/index.js';
 
@@ -17,6 +18,7 @@ describe('Phase 1 write contracts', () => {
         displayName: 'Travel card',
         kind: 'credit_card',
         nativeCurrency: 'USD',
+        marketCode: 'TZ',
         creditLimit: '5000.00'
       }).success
     ).toBe(true);
@@ -25,6 +27,7 @@ describe('Phase 1 write contracts', () => {
         displayName: 'Savings',
         kind: 'savings',
         nativeCurrency: 'CAD',
+        marketCode: 'CA',
         creditLimit: '5000.00'
       }).success
     ).toBe(false);
@@ -33,6 +36,7 @@ describe('Phase 1 write contracts', () => {
         displayName: 'Bad card',
         kind: 'credit_card',
         nativeCurrency: 'USD',
+        marketCode: 'TZ',
         creditLimit: '0.00'
       }).success
     ).toBe(false);
@@ -42,7 +46,8 @@ describe('Phase 1 write contracts', () => {
     const account = {
       displayName: 'Travel card',
       kind: 'credit_card',
-      nativeCurrency: 'USD'
+      nativeCurrency: 'USD',
+      marketCode: 'TZ'
     } as const;
     expect(accountCreateSchema.safeParse({ ...account, accountRefMasked: '•••• 4242' }).success).toBe(true);
     expect(accountCreateSchema.safeParse({ ...account, accountRefMasked: 'ending 54321' }).success).toBe(true);
@@ -56,7 +61,12 @@ describe('Phase 1 write contracts', () => {
         categoryId: 'e1bb45a1-04fd-4b64-a95b-f39714e8b522'
       })
     ).toMatchObject({ applyToMerchant: false });
-    expect(baseCurrencyChangeSchema.safeParse({ baseCurrency: 'cad' }).success).toBe(false);
+    expect(baseCurrencyChangeSchema.safeParse({ baseCurrency: 'cad', confirmed: true }).success).toBe(false);
+    expect(baseCurrencyChangeSchema.safeParse({ baseCurrency: 'USD', confirmed: true }).success).toBe(false);
+    expect(baseCurrencyChangeSchema.safeParse({ baseCurrency: 'TZS' }).success).toBe(false);
+    expect(baseCurrencyChangeSchema.safeParse({ baseCurrency: 'TZS', confirmed: true }).success).toBe(true);
+    expect(settingsPatchSchema.safeParse({ marketProfile: 'CA' }).success).toBe(true);
+    expect(settingsPatchSchema.safeParse({ marketProfile: null }).success).toBe(true);
   });
 });
 

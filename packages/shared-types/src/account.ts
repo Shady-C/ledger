@@ -6,6 +6,7 @@ import {
   positiveDecimalStringSchema,
   uuidSchema
 } from './primitives.js';
+import { marketCodeSchema } from './market.js';
 
 export const accountKindSchema = z.enum(['credit_card', 'chequing', 'savings', 'wallet']);
 export const balanceBasisSchema = z.enum(['balance', 'net_activity']);
@@ -23,6 +24,7 @@ export const accountSummarySchema = z.object({
   institutionName: z.string().min(1).nullable(),
   kind: accountKindSchema,
   nativeCurrency: currencyCodeSchema,
+  marketCode: marketCodeSchema.nullable(),
   accountRefMasked: maskedAccountReferenceSchema.nullable(),
   currentBalance: decimalStringSchema,
   currentBalanceBase: decimalStringSchema.nullable(),
@@ -59,6 +61,7 @@ const accountWriteFields = {
   displayName: z.string().trim().min(1).max(120),
   kind: accountKindSchema,
   nativeCurrency: currencyCodeSchema,
+  marketCode: marketCodeSchema,
   accountRefMasked: maskedAccountReferenceSchema.nullable().optional(),
   creditLimit: positiveDecimalStringSchema.nullable().optional()
 };
@@ -82,6 +85,7 @@ export const accountPatchSchema = z
     displayName: accountWriteFields.displayName.optional(),
     kind: accountWriteFields.kind.optional(),
     nativeCurrency: accountWriteFields.nativeCurrency.optional(),
+    marketCode: accountWriteFields.marketCode.optional(),
     accountRefMasked: accountWriteFields.accountRefMasked,
     creditLimit: accountWriteFields.creditLimit
   })

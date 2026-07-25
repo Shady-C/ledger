@@ -17,6 +17,8 @@ describe('transactionQuerySchema', () => {
       pageSize: 50
     });
     expect(transactionQuerySchema.safeParse({ pageSize: '101' }).success).toBe(false);
+    expect(transactionQuerySchema.parse({ market: 'TZ' })).toMatchObject({ market: 'TZ' });
+    expect(transactionQuerySchema.safeParse({ market: 'US' }).success).toBe(false);
   });
 
   it('rejects unknown keys and backwards date ranges', () => {
@@ -37,6 +39,7 @@ describe('analyticsQuerySchema', () => {
     expect(
       analyticsQuerySchema.safeParse({
         accountId: 'e1bb45a1-04fd-4b64-a95b-f39714e8b522',
+        market: 'TZ',
         from: '2026-01-01'
       }).success
     ).toBe(true);

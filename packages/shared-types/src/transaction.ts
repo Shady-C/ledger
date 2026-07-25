@@ -8,6 +8,8 @@ import {
 } from './primitives.js';
 import { categorySourceSchema } from './category.js';
 
+export const conversionIndicatorSchema = z.enum(['fx', 'converted', 'pending']);
+
 export const transactionDirectionSchema = z.enum([
   'debit',
   'credit',
@@ -46,6 +48,7 @@ export const transactionSchema = z.object({
   fxFeeAmountNative: decimalStringSchema.nullable(),
   isFxFee: z.boolean(),
   valuationStatus: z.enum(['valued', 'pending_fx']),
+  conversionIndicators: z.array(conversionIndicatorSchema).default([]),
   direction: transactionDirectionSchema,
   runningBalance: decimalStringSchema,
   runningBalanceNative: decimalStringSchema,
@@ -59,6 +62,36 @@ export const transactionPageSchema = z.object({
   pageSize: z.number().int().positive(),
   total: z.number().int().nonnegative(),
   totalPages: z.number().int().nonnegative()
+});
+
+export const transactionMoneySchema = z.object({
+  amount: decimalStringSchema,
+  currency: currencyCodeSchema
+});
+
+export const transactionConversionEvidenceSchema = z.object({
+  indicators: z.array(conversionIndicatorSchema),
+  valuationStatus: z.enum(['valued', 'pending_fx']),
+  original: transactionMoneySchema.nullable(),
+  posted: transactionMoneySchema,
+  reporting: transactionMoneySchema.nullable(),
+  reportingRate: decimalStringSchema.nullable(),
+  reportingRateDate: isoDateSchema.nullable(),
+  bankAppliedRate: decimalStringSchema.nullable(),
+  referenceRate: decimalStringSchema.nullable(),
+  referenceRateDate: isoDateSchema.nullable(),
+  referenceRateSource: z.string().min(1).nullable(),
+  explicitFeeNative: decimalStringSchema.nullable(),
+  explicitFeeBase: decimalStringSchema.nullable(),
+  estimatedMarkupNative: decimalStringSchema.nullable(),
+  estimatedMarkupBase: decimalStringSchema.nullable(),
+  runningBalanceNative: decimalStringSchema,
+  runningBalanceBase: decimalStringSchema.nullable()
+});
+
+export const transactionDetailResponseSchema = z.object({
+  transaction: transactionSchema,
+  conversionEvidence: transactionConversionEvidenceSchema
 });
 
 export const transactionCategoryPatchSchema = z
@@ -80,6 +113,9 @@ export const transactionCategoryUpdateResponseSchema = z.object({
 });
 
 export type Transaction = z.infer<typeof transactionSchema>;
+export type ConversionIndicator = z.infer<typeof conversionIndicatorSchema>;
+export type TransactionMoney = z.infer<typeof transactionMoneySchema>;
+export type TransactionDetailResponse = z.infer<typeof transactionDetailResponseSchema>;
 export type TransactionDirection = z.infer<typeof transactionDirectionSchema>;
 export type TransactionPage = z.infer<typeof transactionPageSchema>;
 export type TransactionCategoryPatch = z.infer<typeof transactionCategoryPatchSchema>;

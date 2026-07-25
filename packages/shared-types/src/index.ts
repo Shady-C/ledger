@@ -5,6 +5,7 @@ export * from './category.js';
 export * from './job.js';
 export * from './institution.js';
 export * from './insights.js';
+export * from './market.js';
 export * from './primitives.js';
 export * from './query-spec.js';
 export * from './transaction.js';
