@@ -147,6 +147,7 @@ def assert_three_layer_transactions(*, usd_account_id: str, tzs_account_id: str)
     assert usd_purchase["amountBase"] == "-54.00"
     assert usd_purchase["currencyBase"] == "CAD"
     assert usd_purchase["valuationStatus"] == "valued"
+    assert usd_purchase["conversionIndicators"] == ["fx"]
     assert usd_purchase["fxFeeAmountNative"] is None
     assert usd_purchase["isFxFee"] is False
 
@@ -161,6 +162,7 @@ def assert_three_layer_transactions(*, usd_account_id: str, tzs_account_id: str)
     assert tzs_purchase["amountBase"] == "-145.80"
     assert tzs_purchase["currencyBase"] == "CAD"
     assert tzs_purchase["valuationStatus"] == "valued"
+    assert tzs_purchase["conversionIndicators"] == ["fx"]
     assert tzs_purchase["fxFeeAmountNative"] == "5000.00"
     assert tzs_purchase["isFxFee"] is False
 
@@ -172,6 +174,21 @@ def assert_three_layer_transactions(*, usd_account_id: str, tzs_account_id: str)
     assert standalone["valuationStatus"] == "valued"
     assert standalone["fxFeeAmountNative"] is None
     assert standalone["isFxFee"] is True
+    assert standalone["conversionIndicators"] == ["fx"]
+
+    detail = api_json(f"/api/transactions/{tzs_purchase['id']}")
+    assert detail["transaction"]["id"] == tzs_purchase["id"]
+    evidence = detail["conversionEvidence"]
+    assert evidence["valuationStatus"] == "valued"
+    assert evidence["original"] == {"amount": "-100.00", "currency": "USD"}
+    assert evidence["posted"] == {"amount": "-270000.00", "currency": "TZS"}
+    assert evidence["reporting"] == {"amount": "-145.80", "currency": "CAD"}
+    assert decimal(evidence["explicitFeeNative"]) == Decimal("5000.00")
+
+    standalone_detail = api_json(f"/api/transactions/{standalone['id']}")
+    assert decimal(standalone_detail["conversionEvidence"]["explicitFeeNative"]) == Decimal(
+        "15000.00"
+    )
 
 
 def assert_fx_analytics() -> None:
@@ -271,13 +288,13 @@ def main() -> None:
     # Retain the permanent Phase 0/1 reconciliation and repeat-ingestion gate.
     phase0_smoke.main()
 
-    fixed = expect_api_error(
+    unsupported = expect_api_error(
         "/api/settings/base-currency",
         method="POST",
-        payload={"baseCurrency": "USD"},
-        status=409,
+        payload={"baseCurrency": "USD", "confirmed": True},
+        status=400,
     )
-    assert fixed["error"]["code"] == "base_currency_fixed", fixed
+    assert unsupported["error"]["code"] == "invalid_request", unsupported
     assert api_json("/api/settings")["baseCurrency"] == "CAD"
 
     institution = api_json(
@@ -290,6 +307,7 @@ def main() -> None:
         name="Smoke USD Chequing",
         kind="chequing",
         currency="USD",
+        market_code="TZ",
         masked="••••5678",
     )
     tzs_account = phase1_smoke.create_account(
@@ -297,6 +315,7 @@ def main() -> None:
         name="Smoke TZS Chequing",
         kind="chequing",
         currency="TZS",
+        market_code="TZ",
         masked="••••2468",
     )
 
@@ -355,6 +374,24 @@ def main() -> None:
     seeded_card = next(account for account in accounts if account["displayName"] == "Amex Card")
     assert decimal(seeded_card["currentBalance"]) == Decimal("2855.59")
     assert api_json("/api/settings")["baseCurrency"] == "CAD"
+    profile = api_json(
+        "/api/settings", method="PATCH", payload={"marketProfile": "TZ"}
+    )
+    assert profile["marketProfile"] == "TZ"
+
+    canada_accounts = api_json("/api/accounts?market=CA")["accounts"]
+    tanzania_accounts = api_json("/api/accounts?market=TZ")["accounts"]
+    assert {account["displayName"] for account in canada_accounts} == {"Amex Card"}
+    assert {account["id"] for account in tanzania_accounts} == {
+        usd_account["id"],
+        tzs_account["id"],
+    }
+    assert api_json(
+        f"/api/transactions?accountId={usd_account['id']}&market=CA&pageSize=100"
+    )["total"] == 0
+    assert api_json(
+        f"/api/transactions?accountId={usd_account['id']}&market=TZ&pageSize=100"
+    )["total"] > 0
 
     assert_three_layer_transactions(
         usd_account_id=usd_account["id"],
@@ -362,6 +399,20 @@ def main() -> None:
     )
     assert_fx_analytics()
     assert_insights()
+    scoped_summary = api_json("/api/insights/summary?range=all&market=TZ")
+    assert scoped_summary["baseCurrency"] == "CAD"
+    assert scoped_summary["coverage"]["valuedTransactionCount"] > 0
+    scoped_trends = api_json(
+        "/api/insights/trends?range=all&groupBy=ledger&market=TZ"
+    )
+    assert scoped_trends["points"], scoped_trends
+
+    phase1_smoke.switch_base_currency("TZS")
+    phase1_smoke.wait_for_background_jobs({"analytics_refresh"})
+    assert api_json("/api/insights/summary?range=all")["baseCurrency"] == "TZS"
+    phase1_smoke.switch_base_currency("CAD")
+    phase1_smoke.wait_for_background_jobs({"analytics_refresh"})
+    assert api_json("/api/insights/summary?range=all")["baseCurrency"] == "CAD"
 
     assert {
         item["currencyBase"]
@@ -370,8 +421,9 @@ def main() -> None:
 
     print(
         "Phase 2 synthetic smoke passed: golden 2855.59, zero-row repeats, "
-        "USD/TZS accounts, three-layer money, fixed CAD, FX evidence, analytics refresh, "
-        "and Insights review. I&M Tanzania TZS acceptance is verified separately."
+        "explicit market scopes, USD/TZS accounts, three-layer money, CAD/TZS round trip, "
+        "FX evidence, analytics refresh, and Insights review. I&M Tanzania TZS acceptance "
+        "is verified separately."
     )
 
 

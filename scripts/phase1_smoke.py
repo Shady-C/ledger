@@ -131,6 +131,7 @@ def create_account(
     name: str,
     kind: str,
     currency: str,
+    market_code: str,
     masked: str,
     credit_limit: str | None = None,
 ) -> dict[str, Any]:
@@ -139,6 +140,7 @@ def create_account(
         "displayName": name,
         "kind": kind,
         "nativeCurrency": currency,
+        "marketCode": market_code,
         "accountRefMasked": masked,
         "creditLimit": credit_limit,
     }
@@ -178,6 +180,7 @@ def assert_ofx_import(job: dict[str, Any], *, added: int, skipped: int) -> None:
 
 
 def switch_base_currency(target: str) -> None:
+    previous_base = str(api_json("/api/settings")["baseCurrency"])
     before = api_json("/api/transactions?pageSize=100")["items"]
     native_truth = {
         item["id"]: (item["amountNative"], item["currencyNative"]) for item in before
@@ -185,7 +188,7 @@ def switch_base_currency(target: str) -> None:
     accepted = api_json(
         "/api/settings/base-currency",
         method="POST",
-        payload={"baseCurrency": target},
+        payload={"baseCurrency": target, "confirmed": True},
     )
     job_id = str(accepted["jobId"])
     observed_bases: set[str] = set()
@@ -210,7 +213,7 @@ def switch_base_currency(target: str) -> None:
     assert {
         item["id"]: (item["amountNative"], item["currencyNative"]) for item in after
     } == native_truth
-    assert observed_bases <= {"CAD", target}
+    assert observed_bases <= {previous_base, target}
     assert api_json("/api/settings")["baseCurrency"] == target
 
 
@@ -235,6 +238,7 @@ def main() -> None:
         name="Smoke USD Card",
         kind="credit_card",
         currency="USD",
+        market_code="CA",
         masked="••••4242",
         credit_limit="2000.00",
     )
@@ -243,6 +247,7 @@ def main() -> None:
         name="Smoke USD Chequing",
         kind="chequing",
         currency="USD",
+        market_code="CA",
         masked="••••5678",
     )
     tzs_wallet = create_account(
@@ -250,6 +255,7 @@ def main() -> None:
         name="Smoke TZS Wallet",
         kind="wallet",
         currency="TZS",
+        market_code="TZ",
         masked="••••2468",
     )
 
@@ -295,17 +301,18 @@ def main() -> None:
     assert exact(hotel["estimatedFeeNative"]) == Decimal("48.50")
     assert exact(hotel["estimatedFeeBase"]) == Decimal("48.50")
 
-    switch_base_currency("USD")
-    worth_usd = api_json("/api/analytics/net-worth")
-    assert worth_usd["status"] == "complete", worth_usd
-    assert worth_usd["baseCurrency"] == "USD"
-    assert exact(worth_usd["assets"]) == Decimal("1400.00")
-    assert exact(worth_usd["liabilities"]) == Decimal("2190.25")
-    assert exact(worth_usd["netWorth"]) == Decimal("-790.25")
+    switch_base_currency("TZS")
+    worth_tzs = api_json("/api/analytics/net-worth")
+    assert worth_tzs["status"] == "complete", worth_tzs
+    assert worth_tzs["baseCurrency"] == "TZS"
+    assert exact(worth_tzs["assets"]) == Decimal("3500000.00")
+    assert exact(worth_tzs["liabilities"]) == Decimal("5475629.63")
+    assert exact(worth_tzs["netWorth"]) == Decimal("-1975629.63")
+    switch_base_currency("CAD")
 
     print(
         "Phase 1 smoke passed: golden 2855.59, OFX1/OFX2/QFX, USD/TZS FX, "
-        "AI categorization, utilization/net worth, repeat idempotency, and atomic USD rebuild."
+        "AI categorization, utilization/net worth, repeat idempotency, and CAD/TZS round trip."
     )
 
 

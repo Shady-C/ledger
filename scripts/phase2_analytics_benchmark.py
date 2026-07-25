@@ -206,8 +206,9 @@ def seed_transactions(database_url: str, transaction_count: int) -> None:
             """
             INSERT INTO institution (name) VALUES ('Phase 2 Benchmark Institution');
 
-            INSERT INTO account (institution_id, display_name, kind, native_currency)
-            SELECT institution.id, 'Benchmark Account ' || series.index, 'credit_card', 'CAD'
+            INSERT INTO account (institution_id, display_name, kind, native_currency, market_code)
+            SELECT institution.id, 'Benchmark Account ' || series.index, 'credit_card', 'CAD',
+                   CASE WHEN series.index % 2 = 0 THEN 'CA' ELSE 'TZ' END
             FROM institution
             CROSS JOIN generate_series(0, 9) AS series(index)
             WHERE institution.name = 'Phase 2 Benchmark Institution';
