@@ -15,6 +15,7 @@ INSERT INTO account (
     display_name,
     kind,
     native_currency,
+    market_code,
     account_ref_masked
 )
 VALUES (
@@ -23,6 +24,7 @@ VALUES (
     'Amex Card',
     'credit_card',
     'CAD',
+    'CA',
     NULL
 )
 ON CONFLICT (id) DO UPDATE
@@ -30,6 +32,7 @@ SET institution_id = EXCLUDED.institution_id,
     display_name = EXCLUDED.display_name,
     kind = EXCLUDED.kind,
     native_currency = EXCLUDED.native_currency,
+    market_code = EXCLUDED.market_code,
     updated_at = now();
 
 INSERT INTO ledger_settings (singleton, base_currency)
