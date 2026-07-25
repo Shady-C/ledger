@@ -35,6 +35,10 @@ type MockState = {
   marketProfile?: 'CA' | 'TZ' | null;
   analyticsRebuilding?: boolean;
   insightsUrls?: string[];
+  askRequests?: Record<string, unknown>[];
+  askStatusReads?: number;
+  askDrilldownPath?: string;
+  settingsReady?: Promise<void>;
 };
 
 const accounts = [
@@ -129,6 +133,39 @@ async function mockLedger(page: Page, state: MockState = {}) {
       state.insightsUrls = [...(state.insightsUrls ?? []), request.url()];
     }
 
+    if (url.pathname === '/api/ask/status' && method === 'GET') {
+      state.askStatusReads = (state.askStatusReads ?? 0) + 1;
+      return json({ enabled: true, available: true, reason: null });
+    }
+    if (url.pathname === '/api/ask' && method === 'POST') {
+      state.askRequests = [...(state.askRequests ?? []), request.postDataJSON() as Record<string, unknown>];
+      return json({
+        kind: 'answered',
+        requestId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        plan: {
+          version: 1,
+          disposition: 'execute',
+          queries: [{ id: 'q1', dataset: 'aggregate', date: { kind: 'preset', value: 'last_month' }, metrics: ['spending'], groupBy: 'category', comparison: 'none', limit: 20 }]
+        },
+        answer: [{ heading: 'Last month', segments: [{ type: 'text', text: 'Dining led spending at ' }, { type: 'fact', ref: 'f1', text: 'CAD 1,250.25' }, { type: 'text', text: '.' }] }],
+        evidence: [{
+          id: 'category-spending', queryId: 'q1', title: 'Category spending', kind: 'bar',
+          columns: [{ key: 'category', label: 'Category', type: 'text' }, { key: 'spending', label: 'Spending', type: 'money', currency: 'CAD' }],
+          rows: [{ category: 'Dining', spending: '1250.25' }, { category: 'Transport', spending: '500.00' }],
+          coverage: { status: 'partial', valuedTransactionCount: 18, pendingFxCount: 1, pendingByCurrency: [{ currency: 'USD', transactionCount: 1 }] },
+          truncated: false,
+          drilldownPath: state.askDrilldownPath ?? `/transactions?categoryId=${categoryId}`
+        }],
+        context: {
+          market: 'ALL', baseCurrency: 'CAD', asOfDate: '2026-07-25', timeZone: 'UTC', analyticsGeneration: 7,
+          thresholdPolicyVersion: 'phase-2-v1', sourceWatermark: '2026-07-24T18:00:00.000Z', sourceChangedSinceGeneration: true,
+          resolvedQueries: [{ queryId: 'q1', dataset: 'aggregate', market: 'ALL', from: '2026-06-01', to: '2026-06-30' }],
+          coverage: { status: 'partial', valuedTransactionCount: 18, pendingFxCount: 1, pendingByCurrency: [{ currency: 'USD', transactionCount: 1 }] }
+        },
+        warnings: ['The current valuation coverage is incomplete.']
+      });
+    }
+
     if (url.pathname === '/api/accounts' && method === 'GET') {
       state.accountReads = (state.accountReads ?? 0) + 1;
       const market = url.searchParams.get('market');
@@ -152,7 +189,10 @@ async function mockLedger(page: Page, state: MockState = {}) {
     if (url.pathname === '/api/accounts' && method === 'POST') return json({ account: accounts[0] }, 201);
     if (url.pathname === '/api/institutions' && method === 'GET') return json({ institutions: [{ id: institutionId, name: 'Northstar Bank' }] });
     if (url.pathname.startsWith('/api/institutions') && method !== 'GET') return json({ institution: { id: institutionId, name: 'Northstar Bank' } });
-    if (url.pathname === '/api/settings' && method === 'GET') return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', marketProfile: state.marketProfile ?? null, updatedAt: '2026-07-20T12:00:00.000Z' });
+    if (url.pathname === '/api/settings' && method === 'GET') {
+      await state.settingsReady;
+      return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', marketProfile: state.marketProfile ?? null, updatedAt: '2026-07-20T12:00:00.000Z' });
+    }
     if (url.pathname === '/api/settings' && method === 'PATCH') {
       state.settingsPatch = request.postDataJSON();
       return json({ baseCurrency: state.activeBaseCurrency ?? 'CAD', marketProfile: (state.settingsPatch as { marketProfile: string }).marketProfile, updatedAt: '2026-07-20T12:00:00.000Z' });
@@ -341,6 +381,98 @@ test('all focused pages support direct loads', async ({ page }) => {
     await page.goto(path);
     await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
   }
+});
+
+test('Ask is the default isolated Insights tab and renders auditable evidence', async ({ page }) => {
+  const state: MockState = {};
+  await mockLedger(page, state);
+  await page.goto('/insights');
+
+  await expect(page.getByRole('tab', { name: 'Ask' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Ask your ledger a question' })).toBeVisible();
+  await expect(page.getByText('External AI disclosure')).toBeVisible();
+  expect(state.insightsUrls ?? []).toHaveLength(0);
+
+  await page.getByRole('button', { name: 'How much did I spend last month?' }).click();
+  await page.getByRole('button', { name: 'Ask Ledger' }).click();
+  await expect(page.getByRole('heading', { name: 'Answer', exact: true })).toBeVisible();
+  await expect(page.getByText('Dining led spending at CAD 1,250.25.')).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Category spending bar chart' })).toBeVisible();
+  await expect(page.getByText(/1 transaction await CAD valuation/)).toBeVisible();
+  await page.getByText('Inspect normalized queries').click();
+  await expect(page.getByText(/"dataset": "aggregate"/)).toBeVisible();
+  await expect(page.getByText('SQL, prompts, and provider payloads are never shown.')).toBeVisible();
+
+  expect(state.askRequests).toHaveLength(1);
+  expect(state.askRequests?.[0]).toMatchObject({
+    question: 'How much did I spend last month?',
+    market: 'ALL',
+    history: []
+  });
+
+  await page.getByRole('tab', { name: 'Overview' }).click();
+  await expect.poll(() => state.insightsUrls?.length ?? 0).toBeGreaterThan(0);
+  await expect(page.getByText('Needs review')).toBeVisible();
+
+  await page.getByRole('tab', { name: 'Ask' }).click();
+  await expect(page.getByText('1 prior validated plan in this tab')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Answer', exact: true })).toBeVisible();
+  const readsBeforeScopeChange = state.insightsUrls?.length ?? 0;
+  await page.getByRole('button', { name: 'Tanzania', exact: true }).click();
+  await expect(page).toHaveURL(/market=TZ/);
+  await expect(page.getByRole('textbox', { name: 'Question' })).toHaveValue('');
+  expect(state.insightsUrls?.length ?? 0).toBe(readsBeforeScopeChange);
+
+  await page.getByRole('tab', { name: 'Overview' }).click();
+  await expect.poll(() => state.insightsUrls?.some((url) => url.includes('market=TZ'))).toBe(true);
+});
+
+test('Ask waits for the saved market and home currency before it becomes available', async ({ page }) => {
+  let releaseSettings = () => {};
+  const settingsReady = new Promise<void>((resolve) => {
+    releaseSettings = resolve;
+  });
+  const state: MockState = {
+    activeBaseCurrency: 'TZS',
+    marketProfile: 'TZ',
+    settingsReady
+  };
+  await mockLedger(page, state);
+  await page.goto('/insights');
+
+  await expect(page.getByText('Loading active Ask scope')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Question' })).toHaveCount(0);
+  expect(state.askStatusReads ?? 0).toBe(0);
+
+  releaseSettings();
+  await expect(page.getByRole('heading', { name: 'Ask your ledger a question' })).toBeVisible();
+  await expect(page.locator('.scope-badges')).toContainText('TZ');
+  await expect(page.getByText('TZS home currency')).toBeVisible();
+  await expect.poll(() => state.askStatusReads ?? 0).toBe(1);
+
+  await page.getByRole('button', { name: 'How much did I spend last month?' }).click();
+  await page.getByRole('button', { name: 'Ask Ledger' }).click();
+  await expect.poll(() => state.askRequests?.[0]?.market).toBe('TZ');
+});
+
+test('Ask drill-down links activate addressable Insights tabs', async ({ page }) => {
+  await mockLedger(page, { askDrilldownPath: '/insights?tab=findings' });
+  await page.goto('/insights');
+  await page.getByRole('button', { name: 'How much did I spend last month?' }).click();
+  await page.getByRole('button', { name: 'Ask Ledger' }).click();
+  await page.getByRole('link', { name: 'Open supporting records' }).click();
+
+  await expect(page).toHaveURL(/\/insights\?tab=findings$/);
+  await expect(page.getByRole('tab', { name: /Findings/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Unusual transaction amount' })).toBeVisible();
+
+  await page.goto('/insights?tab=recurring');
+  await expect(page.getByRole('tab', { name: 'Recurring' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Recurring activity' })).toBeVisible();
+
+  await page.goto('/insights?tab=fx');
+  await expect(page.getByRole('tab', { name: 'FX' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'FX rate and cost evidence' })).toBeVisible();
 });
 
 test('mobile navigation uses Home, Activity, Insights, and More', async ({ page }) => {
@@ -573,6 +705,7 @@ test('insight findings expose evidence and explicit review actions', async ({ pa
   const state: MockState = {};
   await mockLedger(page, state);
   await page.goto('/insights');
+  await page.getByRole('tab', { name: 'Overview' }).click();
   await expect(page.getByText('Needs review')).toBeVisible();
   const findingsTab = page.getByRole('tab', { name: /Findings/ });
   await findingsTab.click();
@@ -588,6 +721,7 @@ test('Insights filters reload every view and tabs support keyboard navigation', 
   const state: MockState = {};
   await mockLedger(page, state);
   await page.goto('/insights');
+  await page.getByRole('tab', { name: 'Overview' }).click();
   await page.getByLabel('Account').selectOption(cardId);
   await expect.poll(() => state.insightsUrls?.some((url) => url.includes(`accountId=${cardId}`))).toBe(true);
   const overview = page.getByRole('tab', { name: 'Overview' });
@@ -602,7 +736,11 @@ test('Insights remains usable without page-level overflow on a mobile viewport',
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/insights');
   await expect(page.getByRole('tablist', { name: 'Insights views' })).toBeVisible();
-  const findingsTab = page.getByRole('tab', { name: 'Findings 1' });
+  await expect(page.getByRole('heading', { name: 'Ask your ledger a question' })).toBeVisible();
+  await expect.poll(() => page.evaluate(
+    () => document.documentElement.scrollWidth <= window.innerWidth
+  )).toBe(true);
+  const findingsTab = page.getByRole('tab', { name: /Findings/ });
   await expect(findingsTab).toBeVisible();
   await findingsTab.click();
   await expect(page.getByRole('heading', { name: 'Unusual transaction amount' })).toBeVisible();
@@ -614,6 +752,7 @@ test('Insights remains usable without page-level overflow on a mobile viewport',
 test('Insights explains the maintenance state during a home-currency rebuild', async ({ page }) => {
   await mockLedger(page, { analyticsRebuilding: true });
   await page.goto('/insights');
+  await page.getByRole('tab', { name: 'Overview' }).click();
   await expect(page.getByText('Insights are rebuilding.')).toBeVisible();
   await expect(page.getByRole('link', { name: 'Open Advanced settings' })).toBeVisible();
 });

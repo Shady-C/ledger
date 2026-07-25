@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { afterNavigate } from '$app/navigation';
   import { onMount } from 'svelte';
   import type {
     AccountsResponse,
@@ -22,6 +23,7 @@
     RecurringStatus
   } from '@ledger/shared-types';
 
+  import AskPanel from '$lib/components/insights/AskPanel.svelte';
   import FindingEvidence from '$lib/components/insights/FindingEvidence.svelte';
   import TrendChart from '$lib/components/insights/TrendChart.svelte';
   import BalanceChart from '$lib/charts/BalanceChart.svelte';
@@ -36,10 +38,11 @@
     type MarketSelection
   } from '$lib/market-scope.js';
 
-  type Tab = 'overview' | 'trends' | 'recurring' | 'findings' | 'fx';
+  type Tab = 'ask' | 'overview' | 'trends' | 'recurring' | 'findings' | 'fx';
   type RecurringDraft = { cadence: RecurringCadence; expectedAmount: string };
 
   const tabs: { id: Tab; label: string }[] = [
+    { id: 'ask', label: 'Ask' },
     { id: 'overview', label: 'Overview' },
     { id: 'trends', label: 'Trends' },
     { id: 'recurring', label: 'Recurring' },
@@ -65,7 +68,8 @@
     'annual'
   ];
 
-  let activeTab: Tab = 'overview';
+  let activeTab: Tab = 'ask';
+  let askMounted = false;
   let range: InsightRange = '12m';
   let accounts: AccountsResponse['accounts'] = [];
   let categories: CategoriesResponse['categories'] = [];
@@ -91,7 +95,10 @@
   let recurringPage = 1;
   let findingsPage = 1;
   let recurringDrafts: Record<string, RecurringDraft> = {};
-  let loading = true;
+  let loading = false;
+  let insightsLoaded = false;
+  let pageReady = false;
+  let scopeReady = false;
   let refreshingTrends = false;
   let pageError = '';
   let analyticsRebuilding = false;
@@ -194,6 +201,7 @@
       balance = balanceResult;
       cashflow = cashflowResult;
       fx = fxResult;
+      insightsLoaded = true;
       syncMerchantOptions(recurringResult.series, findingsResult.findings, trendsResult.points);
       syncRecurringDrafts(recurringResult.series);
     } catch (error) {
@@ -293,6 +301,13 @@
 
   function activateTab(tab: Tab) {
     activeTab = tab;
+    if (scopeReady && tab === 'ask') askMounted = true;
+    if (scopeReady && tab !== 'ask' && !insightsLoaded && !loading) void load();
+  }
+
+  function linkedTab(url: URL): Extract<Tab, 'recurring' | 'findings' | 'fx'> | null {
+    const tab = url.searchParams.get('tab');
+    return tab === 'recurring' || tab === 'findings' || tab === 'fx' ? tab : null;
   }
 
   function tabKeydown(event: KeyboardEvent, index: number) {
@@ -304,7 +319,7 @@
     if (event.key === 'Home') next = 0;
     if (event.key === 'End') next = tabs.length - 1;
     const tab = tabs[next]!;
-    activeTab = tab.id;
+    activateTab(tab.id);
     requestAnimationFrame(() => document.getElementById(`insights-tab-${tab.id}`)?.focus());
   }
 
@@ -320,9 +335,14 @@
   }
 
   async function initialize() {
-    const state = await initializeMarketScope(new URL(window.location.href));
+    const url = new URL(window.location.href);
+    const requestedTab = linkedTab(url);
+    if (requestedTab) activeTab = requestedTab;
+    const state = await initializeMarketScope(url);
     market = state.market;
-    await load();
+    scopeReady = true;
+    if (activeTab === 'ask') askMounted = true;
+    else await load();
   }
 
   function handleMarketChange(event: Event) {
@@ -331,19 +351,27 @@
     if (trendGroupBy === 'account') trendGroupBy = 'ledger';
     recurringPage = 1;
     findingsPage = 1;
-    void load();
+    insightsLoaded = false;
+    if (activeTab !== 'ask') void load();
   }
 
   onMount(() => {
+    pageReady = true;
     void initialize();
     window.addEventListener('ledger:market-change', handleMarketChange);
     return () => window.removeEventListener('ledger:market-change', handleMarketChange);
+  });
+
+  afterNavigate(({ to }) => {
+    if (!to || to.url.pathname !== '/insights') return;
+    const requestedTab = linkedTab(to.url);
+    if (requestedTab && requestedTab !== activeTab) activateTab(requestedTab);
   });
 </script>
 
 <svelte:head>
   <title>Insights · Ledger</title>
-  <meta name="description" content="Explore deterministic spending trends, recurring activity, seasonality, and reviewable financial findings." />
+  <meta name="description" content="Ask grounded ledger questions and explore deterministic spending trends, recurring activity, seasonality, and reviewable findings." />
 </svelte:head>
 
 <div class="page insights-page">
@@ -351,8 +379,9 @@
     <div class="page-header-copy">
       <p class="eyebrow">{marketLabel(market)} deterministic analytics</p>
       <h1>See the pattern. Inspect the proof.</h1>
-      <p class="lede">Trends, recurring activity, and unusual events are calculated from your ledger. Every finding keeps its evidence and review state.</p>
+      <p class="lede">Ask a grounded question or explore deterministic trends, recurring activity, and unusual events. Answers and findings keep their supporting evidence.</p>
     </div>
+    {#if activeTab !== 'ask'}
     <div class="header-controls">
       <label class="field compact-field">
         <span>History</span>
@@ -386,15 +415,16 @@
         </select>
       </label>
     </div>
+    {/if}
   </header>
 
-  {#if pageError}
+  {#if activeTab !== 'ask' && pageError}
     <div class:info={analyticsRebuilding} class="status-banner" role={analyticsRebuilding ? 'status' : 'alert'}><strong>{analyticsRebuilding ? 'Insights are rebuilding.' : 'Insights need attention.'}</strong><span>{pageError}</span><button class="button-secondary" type="button" on:click={load}>Check again</button></div>
-  {:else if message}
+  {:else if activeTab !== 'ask' && message}
     <div class="status-banner success" role="status"><strong>Updated.</strong><span>{message}</span><button class="text-button" type="button" on:click={() => (message = '')}>Dismiss</button></div>
   {/if}
 
-  {#if summary?.coverage.status === 'partial'}
+  {#if activeTab !== 'ask' && summary?.coverage.status === 'partial'}
     <div class="status-banner info" role="status">
       <strong>{reportingCurrency} totals are partial.</strong>
       <span>{summary.coverage.unvaluedTransactionCount} transaction{summary.coverage.unvaluedTransactionCount === 1 ? '' : 's'} await {reportingCurrency} valuation and are excluded from consolidated totals.</span>
@@ -411,7 +441,7 @@
         aria-controls={`insights-panel-${tab.id}`}
         tabindex={activeTab === tab.id ? 0 : -1}
         class:active={activeTab === tab.id}
-        disabled={loading}
+        disabled={!pageReady}
         on:click={() => activateTab(tab.id)}
         on:keydown={(event) => tabKeydown(event, index)}
       >
@@ -421,6 +451,24 @@
     {/each}
   </div>
 
+  {#if askMounted}
+    <div
+      id="insights-panel-ask"
+      role="tabpanel"
+      aria-labelledby="insights-tab-ask"
+      aria-hidden={activeTab !== 'ask'}
+      class:hidden-panel={activeTab !== 'ask'}
+      class="tab-panel"
+    >
+      <AskPanel market={market || 'ALL'} currency={reportingCurrency} />
+    </div>
+  {:else if activeTab === 'ask'}
+    <div id="insights-panel-ask" role="tabpanel" aria-labelledby="insights-tab-ask" class="tab-panel">
+      <div class="panel empty-state" role="status"><strong>Loading active Ask scope</strong><p>Ledger is resolving the saved market and home currency before enabling questions.</p></div>
+    </div>
+  {/if}
+
+  {#if activeTab !== 'ask'}
   {#if loading}
     <div class="loading-grid" aria-label="Loading Insights"><div class="skeleton-block"></div><div class="skeleton-block"></div><div class="skeleton-block"></div></div>
   {:else if analyticsRebuilding && !summary}
@@ -556,6 +604,7 @@
       </article>
     </div>
   {/if}
+  {/if}
 </div>
 
 <style>
@@ -567,6 +616,7 @@
   .insights-tabs button.active { color: white; background: var(--forest); }
   .insights-tabs button span { display: grid; min-width: 20px; height: 20px; padding: 0 0.3rem; place-items: center; color: var(--forest); border-radius: 999px; background: var(--mint); font-size: 0.58rem; }
   .tab-panel { display: grid; gap: 1rem; }
+  .hidden-panel { display: none; }
   .loading-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; }
   .loading-grid > :first-child { grid-row: span 2; min-height: 380px; }
   .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
