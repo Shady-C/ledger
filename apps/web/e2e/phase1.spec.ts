@@ -39,6 +39,7 @@ type MockState = {
   askStatusReads?: number;
   askDrilldownPath?: string;
   settingsReady?: Promise<void>;
+  needsFormatSupport?: boolean;
 };
 
 const accounts = [
@@ -343,13 +344,36 @@ async function mockLedger(page: Page, state: MockState = {}) {
       return json({ transaction: { id: transactionId, categoryId: categoryTwoId, categoryName: 'Other', categorySource: 'user_transaction', categoryConfidence: '1.00' }, merchantTransactionsUpdated: 1 });
     }
 
-    if (url.pathname === '/api/jobs' && method === 'GET') return json({ jobs: [{ id: jobId, kind: 'ingest', status: 'done', createdAt: '2026-07-20T12:00:00.000Z', finishedAt: '2026-07-20T12:00:02.000Z', retryCount: 0, maxRetries: 3 }], page: 1, pageSize: 25, total: 1, totalPages: 1 });
+    if (url.pathname === '/api/jobs' && method === 'GET') {
+      return json({
+        jobs: [{
+          id: jobId,
+          kind: 'ingest',
+          status: state.needsFormatSupport ? 'needs_ai' : 'done',
+          createdAt: '2026-07-20T12:00:00.000Z',
+          finishedAt: '2026-07-20T12:00:02.000Z',
+          retryCount: 0,
+          maxRetries: 3
+        }],
+        page: 1,
+        pageSize: 25,
+        total: 1,
+        totalPages: 1
+      });
+    }
     if (url.pathname.startsWith('/api/jobs/') && method === 'GET') {
       if (state.baseJobStarted) {
         state.activeBaseCurrency = state.targetBaseCurrency ?? 'TZS';
         return json({
           id: url.pathname.split('/').at(-1), kind: 'base_currency_rebuild', status: 'done', createdAt: '2026-07-20T12:00:00.000Z', finishedAt: '2026-07-20T12:00:02.000Z', retryCount: 0, maxRetries: 3, error: null,
           result: { previousBaseCurrency: 'CAD', targetBaseCurrency: state.activeBaseCurrency, transactionsUpdated: 1, settingsUpdated: true }
+        });
+      }
+      if (state.needsFormatSupport) {
+        const digest = `${'a'.repeat(61)}c99`;
+        return json({
+          id: url.pathname.split('/').at(-1), kind: 'ingest', status: 'needs_ai', createdAt: '2026-07-20T12:00:00.000Z', finishedAt: '2026-07-20T12:00:02.000Z', retryCount: 0, maxRetries: 3, error: null,
+          result: { added: 0, skipped: 0, files: [{ fileKey: `statements/${assetId}/${digest}.pdf`, adapter: 'pdf_table', status: 'needs_ai', added: 0, skipped: 0, statementId: null, reason: 'deterministic PDF table was not usable: CSV header requires date and amount columns', reconciliation: null }] }
         });
       }
       return json({
@@ -776,4 +800,21 @@ test('statement upload polls the accepted import job', async ({ page }) => {
   await page.getByRole('button', { name: 'Import 1' }).click();
   await expect.poll(() => state.importStarted).toBe(true);
   await expect(page.getByText('Import complete: 1 added')).toBeVisible();
+});
+
+test('terminal PDF format support is truthful and privacy-safe', async ({ page }) => {
+  const digest = `${'a'.repeat(61)}c99`;
+  await mockLedger(page, { needsFormatSupport: true });
+  await page.goto('/imports');
+
+  const job = page.getByRole('button', { name: /Needs format support/i });
+  await expect(job).toBeVisible();
+  await expect(page.getByText('0/3 retries')).toHaveCount(0);
+  await job.click();
+
+  await expect(page.getByText('PDF statement · …c99')).toBeVisible();
+  await expect(page.getByText('pdf_table · needs format support')).toBeVisible();
+  await expect(page.getByText('This PDF layout could not be parsed safely.')).toBeVisible();
+  await expect(page.getByText(/CSV header requires/i)).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(digest);
 });

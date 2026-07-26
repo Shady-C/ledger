@@ -74,7 +74,7 @@
         tone = 'error';
         const addedBeforeStop = job.result?.added ?? 0;
         message = job.status === 'needs_ai'
-          ? `${addedBeforeStop ? `${addedBeforeStop} added. ` : ''}At least one statement is waiting for a reviewed AI column map.`
+          ? `${addedBeforeStop ? `${addedBeforeStop} added. ` : ''}At least one statement needs format support before Ledger can safely import it.`
           : `${addedBeforeStop ? `${addedBeforeStop} added before the import stopped. ` : ''}${job.error || 'The import failed. Check the worker logs for details.'}`;
         submitting = false;
         onComplete();
@@ -120,7 +120,7 @@
   <div class="copy">
     <p class="eyebrow">Statement inbox</p>
     <h2 id="upload-title">Turn statements into an auditable ledger.</h2>
-    <p class="support">CSV, XLSX, OFX/QFX, or a supported deterministic PDF such as I&amp;M Tanzania TZS. Repeat uploads are safely skipped.</p>
+    <p class="support">CSV, XLSX, OFX/QFX, or a supported deterministic PDF such as I&amp;M Tanzania TZS or Wealthsimple Chequing. Repeat uploads are safely skipped.</p>
   </div>
 
   <form on:submit|preventDefault={upload}>

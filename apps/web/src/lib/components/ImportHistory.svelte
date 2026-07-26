@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { JobResponse } from '@ledger/shared-types';
+  import type { IngestFileResult, JobResponse } from '@ledger/shared-types';
   import { dateTime, readJson } from './api-client.js';
 
   type JobListItem = {
@@ -22,7 +22,27 @@
   let loadingDetail = false;
 
   function statusLabel(status: JobListItem['status']) {
-    return status === 'needs_ai' ? 'Needs mapping review' : status.replace('_', ' ');
+    return status === 'needs_ai' ? 'Needs format support' : status.replace('_', ' ');
+  }
+
+  function fileStatusLabel(status: string) {
+    return status === 'needs_ai' ? 'needs format support' : status.replaceAll('_', ' ');
+  }
+
+  function statementLabel(fileKey: string) {
+    const storedName = fileKey.split('/').at(-1) ?? '';
+    const digestName = /^([a-f\d]{64})\.(csv|xlsx|pdf|ofx|qfx)$/i.exec(storedName);
+    if (!digestName) return 'Statement file';
+    const digest = digestName[1] ?? '';
+    const format = digestName[2] ?? '';
+    return `${format.toUpperCase()} statement · …${digest.slice(-3)}`;
+  }
+
+  function displayReason(file: Pick<IngestFileResult, 'fileKey' | 'status' | 'reason'>) {
+    if (file.status !== 'needs_ai') return file.reason ?? '';
+    return /\.pdf$/i.test(file.fileKey)
+      ? 'This PDF layout could not be parsed safely.'
+      : 'This statement layout could not be parsed safely.';
   }
 
   async function toggle(job: JobListItem) {
@@ -62,8 +82,10 @@
           <button class="job-row" type="button" aria-expanded={expandedId === job.id} on:click={() => toggle(job)}>
             <span class:failed={job.status === 'failed'} class:needs-ai={job.status === 'needs_ai'} class:done={job.status === 'done'} class="status-dot" aria-hidden="true"></span>
             <span class="job-copy"><strong>{statusLabel(job.status)}</strong><small>{dateTime(job.createdAt)} · {job.id.slice(0, 8)}</small></span>
-            <span class="retry">{job.retryCount}/{job.maxRetries} retries</span>
-            <span aria-hidden="true">{expandedId === job.id ? '−' : '+'}</span>
+            {#if job.status !== 'done' && job.status !== 'needs_ai'}
+              <span class="retry">{job.retryCount}/{job.maxRetries} retries</span>
+            {/if}
+            <span class="expand-glyph" aria-hidden="true">{expandedId === job.id ? '−' : '+'}</span>
           </button>
 
           {#if expandedId === job.id}
@@ -79,17 +101,17 @@
                   <ul class="files">
                     {#each detail.result.files as file}
                       <li>
-                        <div><strong>{file.fileKey.split('/').at(-1)}</strong><small>{file.adapter} · {file.status}</small></div>
+                        <div><strong>{statementLabel(file.fileKey)}</strong><small>{file.adapter} · {fileStatusLabel(file.status)}</small></div>
                         {#if file.reconciliation}
                           <span class:issue={file.reconciliation.status !== 'ok'} class="pill">{file.reconciliation.status}</span>
-                        {:else if file.reason}
-                          <span class="reason">{file.reason}</span>
+                        {:else if file.reason || file.status === 'needs_ai'}
+                          <span class="reason">{displayReason(file)}</span>
                         {/if}
                       </li>
                     {/each}
                   </ul>
                 {:else}
-                  <p>{job.status === 'needs_ai' ? 'This format is waiting for an AI-proposed column map to pass validation.' : 'The worker has not produced a result yet.'}</p>
+                  <p>{job.status === 'needs_ai' ? 'This statement format is not supported yet. No further retries are scheduled.' : 'The worker has not produced a result yet.'}</p>
                 {/if}
               {:else if detail}
                 <p>This {detail.kind.replaceAll('_', ' ')} job is shown in the global job queue.</p>
@@ -114,6 +136,7 @@
   .status-dot.needs-ai { background: var(--coral); }
   .job-copy { display: grid; gap: 0.2rem; }
   .job-copy strong { font-size: 0.74rem; text-transform: capitalize; }
+  .expand-glyph { grid-column: 4; }
   .job-copy small,
   .retry { color: var(--muted); font-size: 0.61rem; }
   .job-detail { padding: 0.2rem 0.2rem 0.9rem 1.85rem; color: var(--muted); font-size: 0.68rem; line-height: 1.5; }
@@ -135,6 +158,7 @@
   @media (max-width: 520px) {
     .retry { display: none; }
     .job-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .expand-glyph { grid-column: 3; }
     .job-detail { padding-left: 0; }
     .files li { align-items: flex-start; }
   }
