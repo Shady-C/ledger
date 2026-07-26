@@ -1,6 +1,6 @@
 # Ledger Phase 3 — Codebase Handoff
 
-**Snapshot:** 2026-07-25
+**Snapshot:** 2026-07-26
 
 **Current phase:** Phase 3
 
@@ -11,6 +11,8 @@ This handoff starts from completed Phase 2 and the separately approved Phase
 and CAD/TZS home reporting are the permanent baseline. Phase 3 is building a
 bounded read-only Ask workflow in SvelteKit under ADR-0009. It remains
 `in_progress`; ADR-0010 adds fail-closed freshness and local-only clarification.
+ADR-0011 adds one targeted deterministic adapter for the exact Wealthsimple
+chequing text-PDF layout while general unknown-PDF work remains Phase 4.
 The phase cannot enter review until all deterministic gates and the one-time
 live Anthropic acceptance run pass.
 
@@ -34,8 +36,9 @@ live Anthropic acceptance run pass.
    [ADR-0006](decisions/0006-im-bank-tanzania-pdf-and-deferred-usd-acceptance.md),
    [ADR-0007](decisions/0007-market-scopes-and-progressive-disclosure.md),
    [ADR-0008](decisions/0008-configurable-cad-tzs-home-currency.md),
-   [ADR-0009](decisions/0009-bounded-tokenized-grounded-ask.md), and
-   [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md).
+   [ADR-0009](decisions/0009-bounded-tokenized-grounded-ask.md),
+   [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md),
+   and [ADR-0011](decisions/0011-wealthsimple-chequing-pdf-v1.md).
 8. [CHANGELOG.md](../CHANGELOG.md) — delivered changes by phase.
 
 `docs/` is canonical. Jira and Confluence are not configured for this project;
@@ -148,7 +151,7 @@ routes are:
 | `/transactions` | Scoped URL-backed filters/sort/paging, one posted amount, conversion indicators, responsive audit drawer, and category correction |
 | `/accounts` | Scoped asset/card sections, market assignment, account/institution editing, and card limits/utilization |
 | `/categories` | Taxonomy editing/archive, unresolved work, proposal review, and categorization retry |
-| `/imports` | Account-targeted upload, job polling, history, reconciliation, failure, and `needs_ai` states |
+| `/imports` | Account-targeted upload, job polling, history, reconciliation, failure, and truthful terminal format-support states with privacy-safe PDF labels |
 | `/insights` | Ask first/default, then Overview, Trends, Recurring, Findings, and FX, with scoped filters, grounded evidence, and review/correction actions |
 | `/settings` | General market profile plus Advanced health, readiness, sensitivity, rebuild, and confirmed CAD/TZS maintenance |
 | `/more` | Mobile hub for Accounts, Categories, Imports, and Settings |
@@ -322,11 +325,13 @@ runtime supports it.
 3. One `ingest` job references the account and content-addressed object keys.
 4. A lease-fenced worker claims the job and decrypts each object in memory.
 5. The adapter registry evaluates OFX/QFX, Amex XLSX, conventional generic CSV,
-   conventional generic XLSX, the named I&M Tanzania TZS image-PDF layout, and
-   deterministic extractable PDF tables.
+   conventional generic XLSX, the named I&M Tanzania TZS image-PDF layout, the
+   named Wealthsimple chequing text-PDF layout, and deterministic extractable
+   PDF tables.
 6. An unsupported CSV/XLSX may enter the AI column-mapping path. Unsupported
-   or irregular PDF remains deterministic `needs_ai`; Phase 3 never sends PDF
-   content to a model or external OCR service.
+   or irregular PDF remains a terminal non-success; an unmatched/rejected
+   generic PDF may settle as `needs_ai`. Phase 3 never sends PDF content to a
+   model or external OCR service.
 7. Parsed rows are normalized with account-kind-aware signs, dated FX rates,
    deterministic categories, merchant identities, and stable dedup hashes.
 8. The worker reconciles opening balance plus native movement against closing
@@ -365,9 +370,20 @@ runtime supports it.
   must reconcile to its printed closing balance. Zero-activity statements are
   accepted only when opening and closing balances agree. A changed layout
   needs a new adapter version.
+- **Wealthsimple chequing PDF:** `wealthsimple_chequing_pdf_v1` recognizes only
+  the known text-PDF fingerprint for CAD asset accounts and reads positioned
+  `pdfplumber` text locally. It parses the statement period, masked account
+  reference, repeated page headers, printed page counters, booked/posted dates,
+  wrapped descriptions, Unicode negative signs, amounts, running balances, and
+  opening/closing summary. Every date, page-sequence check, balance transition,
+  transaction sum, final balance, and summary must agree exactly; zero activity
+  also requires equal opening/closing balances and no transaction-like residue.
+  A changed or ambiguous layout writes no financial rows and needs a new
+  adapter version.
 - **Other PDF:** deterministic extractable-table parsing remains available.
-  Missing or rejected tables return `needs_ai`; general or irregular-PDF
-  AI/OCR remains outside Phase 3.
+  Missing or rejected tables may return `needs_ai`; general unknown-PDF
+  extraction, mapping/review, AI/OCR, and local-model fallback remain outside
+  Phase 3.
 
 ## Worker Modules and Providers
 
@@ -384,6 +400,7 @@ runtime supports it.
 | `worker/analytics.py` | Exact-decimal aggregate/detector primitives plus PostgreSQL incremental/full refresh and atomic publication |
 | `worker/adapters/generic_xlsx.py` | Deterministic conventional XLSX v1 parser backed by generic tabular rules |
 | `worker/adapters/im_bank_tz_pdf.py` | Versioned I&M Tanzania TZS image-PDF adapter with bounded local OCR and exact cross-checks |
+| `worker/adapters/wealthsimple_chequing_pdf.py` | Versioned Wealthsimple chequing text-PDF adapter with positioned local parsing and exact balance/summary checks |
 | `worker/categorize.py` | Account-kind-aware deterministic rules and flow classification |
 | `worker/ai_categorization.py` | Minimized batching, structured validation, thresholding, mapping, and proposals |
 | `worker/column_mapping.py` | Redacted unknown-tabular mapping, validation, and learned adapter persistence |
@@ -595,6 +612,12 @@ requires exact reconciliation for every statement, and proves zero-row repeat
 ingestion without printing transaction descriptions or account details. The
 raw PDFs remain ignored local inputs and are not required in CI.
 
+The six private Wealthsimple source PDFs likewise remain outside version
+control and have no new documented Make target. The 2026-07-26 post-deployment
+acceptance reused their retained encrypted object keys while preserving the
+earlier terminal job: a fresh ingest reconciled all six statements and added 76
+rows, and the identical repeat added zero rows and skipped all 76.
+
 Run the extended smoke flow only against a disposable, healthy fresh stack:
 
 ```sh
@@ -670,13 +693,22 @@ results. The two checked-in I&M Tanzania OCR-text fixtures are sanitized
 derivatives of the supplied stable layout; they cover transaction and
 zero-activity parsing without committing complete PDFs.
 
+Wealthsimple tests use a sanitized two-page PDF plus a positioned-text
+derivative that retain the required geometry, page counters, repeated headers,
+wrapped rows, Unicode signs, and reconciliation evidence without retaining
+private names, references, or transactions. The default `pdfplumber` reader and
+mutated fail-closed evidence paths are both covered; the six source PDFs and
+their extracted private text are not committed.
+
 The original private Amex exports used during Phase 0 acceptance are not
 checked in. The 11 sanitized I&M Tanzania TZS PDFs stay under ignored
 `output/pdf` and are validated locally: all 11 reconcile, covering 41 rows and
 five zero-activity statements, while the largest 17-row file adds zero rows on
 repeat. Synthetic fixtures still cover USD protocol behavior, both three-layer
 currency directions, retries, privacy validation, and failure paths. A named
-USD institution adapter is deferred by ADR-0006.
+USD institution adapter is deferred by ADR-0006. The separate Wealthsimple
+acceptance was verified after deployment on 2026-07-26 with six reconciled
+statements, 76 newly imported rows, and zero new rows on the identical repeat.
 
 ## Common Extension and Debug Paths
 
@@ -689,9 +721,13 @@ USD institution adapter is deferred by ADR-0006.
   regression that asserts exact decimal results and polarity.
 - Inspect `docker compose ps --all`, `docker compose logs --tail=200 web worker`,
   the `job` row, and per-file job result before changing retry behavior.
-- A `needs_ai` import is a completed fail-closed outcome, not a partially
-  persisted statement. A `failed` service job after retry exhaustion should
-  leave previously reconciled financial rows intact.
+- A `needs_ai` import is a completed fail-closed outcome, presented to users as
+  needing format support rather than waiting for AI; it is not a partially
+  persisted statement. Terminal `done`/`needs_ai` jobs show no retry counter,
+  and content-addressed PDF keys use a short privacy-safe statement label. A
+  matched adapter with invalid financial evidence may instead fail the ingest.
+  A `failed` service job after retry exhaustion should leave previously
+  reconciled financial rows intact.
 - If readers show mixed currencies, inspect `ledger_settings`, transaction base
   currencies, the active `base_currency_rebuild` job, and the valuation-lock
   path before attempting any repair.
@@ -752,6 +788,9 @@ USD institution adapter is deferred by ADR-0006.
 - ADR-0009, ADR-0010, and the Phase 3 build plan govern the bounded Ask
   workflow. The
   earlier iterative tool-using-agent design is superseded.
+- ADR-0011 separately governs `wealthsimple_chequing_pdf_v1`, its local-only
+  positioned-text parser, exact running-balance/summary validation, sanitized
+  fixture boundary, and truthful terminal Imports UI.
 - Phase 3 adds strict Ask contracts, a TypeScript provider seam, local
   date/entity resolution, closed parameterized query compilation, generation-
   pinned execution, opaque fact references, narration validation/fallback, Ask
@@ -760,7 +799,9 @@ USD institution adapter is deferred by ADR-0006.
   answer, evidence, or conversation state.
 - Phase 3 stays `in_progress` until its deterministic release suite,
   100,000-transaction Ask benchmark, disposable stub smoke, and one-time live
-  Anthropic acceptance run pass.
+  Anthropic acceptance run pass. The private Wealthsimple replay passed on
+  2026-07-26: six statements produced 76 reconciled rows and the identical
+  repeat produced zero new rows while preserving the earlier terminal job.
 
 After significant documentation changes, sync `docs/` to Confluence when a
 space is configured. It is currently unconfigured, so no publication step can

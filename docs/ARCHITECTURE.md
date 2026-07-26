@@ -7,8 +7,9 @@
 
 **Status:** Phase 1 completed on 2026-07-24. Phase 2 and its separately approved
 Phase 2.1 follow-up completed on 2026-07-25. Phase 3 is `in_progress` under
-ADR-0009 and its ADR-0010 freshness/clarification refinement. A named USD
-institution adapter remains deferred under ADR-0006.
+ADR-0009, its ADR-0010 freshness/clarification refinement, and ADR-0011's
+targeted Wealthsimple chequing PDF exception. A named USD institution adapter
+remains deferred under ADR-0006; general unknown-PDF support remains Phase 4.
 **Audience:** the person building it (you).
 **Author's stance:** every tech choice below is argued, not defaulted. Where I
 picked a non-obvious tool, there's an ADR explaining what I rejected and why.
@@ -119,9 +120,10 @@ flowchart TB
 **Why this split (polyglot on purpose):** the two hard problems are (1) turning
 supported bank PDF/CSV/XLSX/OFX exports into clean rows and (2) statistical
 analytics. Python owns both — `pdfplumber` for PDF access and tables, bounded
-local Tesseract for the named I&M Tanzania image layout, `polars` for tabular
-processing, and exact `Decimal`/standard-library statistics for the current
-trend and anomaly work. Everything
+local Tesseract for the named I&M Tanzania image layout, positioned
+`pdfplumber` text for the named Wealthsimple chequing layout, `polars` for
+tabular processing, and exact `Decimal`/standard-library statistics for the
+current trend and anomaly work. Everything
 user-facing and orchestration-shaped is TypeScript so the client and API share
 one type system. This is a deliberate trade: one extra runtime in exchange for
 the right tool on each side. Phase 2 added the deterministic analytics engine;
@@ -404,11 +406,13 @@ sequenceDiagram
     W->>W: 1. detect format + institution (fingerprint)
     alt known adapter
         W->>W: 2. parse with adapter (deterministic)
-    else unknown format
+    else unknown CSV/XLSX format
         W->>AI: 2. infer column map (once)
         AI-->>W: proposed mapping
         W->>W: validate mapping on sample rows
         W->>DB: save new ADAPTER (version++)
+    else unmatched or rejected PDF
+        W->>W: terminate locally as needs format support
     end
     W->>W: 3. normalize → canonical rows
     W->>W: 4. enrich active home-currency valuation when available
@@ -421,7 +425,7 @@ sequenceDiagram
 ```
 
 ### Format detection & adapters
-- **Detection**: file extension → structural fingerprint (header row signature for CSV/XLSX; extractable or local-OCR text layout signature for PDF). A learned fingerprint maps to an `ADAPTER` row. No deterministic match → unknown path.
+- **Detection**: file extension → structural fingerprint (header row signature for CSV/XLSX; extractable or local-OCR text layout signature for PDF). A learned fingerprint maps to an `ADAPTER` row. An unknown CSV/XLSX may use the bounded mapping path; an unmatched PDF remains local and terminal.
 - **Adapter** = a saved `column_map` + detection fingerprint per `(institution, format)`. Deterministic once it exists.
 - **Parsers by format:**
   - **CSV/XLSX** → conventional CSV and XLSX tables use the same
@@ -433,9 +437,17 @@ sequenceDiagram
     cross-checks amount magnitudes against consecutive running balances,
     printed totals, and the closing balance before returning rows. It is a
     named adapter, not a general OCR fallback.
+  - **Wealthsimple chequing PDF v1** → positioned `pdfplumber` text reads the
+    exact known text-PDF fingerprint for CAD asset accounts. The adapter parses
+    period/account evidence, repeated headers, printed page counters,
+    booked/posted dates, wrapped descriptions, signed amounts, and running
+    balances, then requires the page sequence, every balance transition, and
+    the opening/closing summary to reconcile exactly. It is a named local
+    adapter, not general PDF mapping.
   - **Other PDF** → deterministic `pdfplumber` table extraction. An irregular
-    or rejected table reports `needs_ai`; Phase 2 never sends PDF content to a
-    provider. General vision/OCR fallback remains later work.
+    or rejected table reports `needs_ai`; Phase 3 never sends PDF content to a
+    provider. General extraction, mapping/review, vision/OCR, and local-model
+    fallback remain Phase 4 work.
   - **OFX/QFX** → deterministic OFX1 SGML and OFX2 XML bank/card parsing.
     Investment statements are unsupported. FITID is required and unique within
     an account's OFX-enriched transactions; statement currency and masked
@@ -491,12 +503,20 @@ fingerprint, mapping, version, validation outcome, creation source, and
 supersession relationship.
 
 The current implementation covers known structures and validated learned
-CSV/XLSX layouts and fails closed to `needs_ai`. Both deterministic and learned
+CSV/XLSX layouts plus the named I&M and Wealthsimple PDF layouts. Unknown
+layouts fail closed without financial rows. Both deterministic and learned
 tabular mappings accept paired original-money columns, inline FX fees, and
 explicit standalone FX-fee evidence. A user-facing mapping
 editor/approval flow, compatibility
 reports for genuinely new concepts, adapter rollback/supersession controls, and
 safe replay after schema evolution belong to Phase 4 ingestion hardening.
+
+`needs_ai` remains the database/API status for a terminal unsupported mapping
+outcome, but the Imports UI describes it as “Needs format support” or “Needs
+attention”; it is not an in-progress AI queue. Terminal `done` and `needs_ai`
+jobs omit retry counters. Because original filenames are discarded under
+ADR-0001, content-addressed PDF keys render as privacy-safe labels such as
+`PDF statement · …c99` instead of exposing a full object key.
 
 ### Idempotency, dedup, reconciliation
 - **Upsert on `dedup_hash`.** New hash → insert. Seen hash → skip (report as "already recorded").
@@ -755,6 +775,7 @@ things." If a row could be deterministic, it is.
 | Recurring detection, anomalies, trends (Phase 2) | **Deterministic** | — | on ingest | materialized |
 | CSV/XLSX parsing (known format) | **Deterministic** | — | every file | adapter cached |
 | I&M Tanzania TZS image-PDF v1 | **Deterministic local OCR + exact checks** | — | every file | versioned adapter |
+| Wealthsimple chequing text-PDF v1 | **Deterministic local positioned text + exact checks** | — | every file | versioned adapter |
 | **Column mapping (new/unknown format)** | AI | capable (Sonnet-class) | once per new format | **saved as adapter** |
 | **PDF extraction (irregular layout only)** | Deferred to Phase 4 | capable, vision | parser fallback | raw file retained |
 | Merchant categorization — head (known) | **Deterministic** | — | every txn | rule map |
@@ -901,8 +922,9 @@ Financial data — treat it like it matters, even single-user.
   categorization payloads or redacted tabular samples. Ask planning receives
   no database structure or contents, and narration receives only opaque fact
   references. PDF content is never sent. The named I&M adapter runs Tesseract
-  inside the worker environment; general PDF vision or OCR fallback remains
-  later work.
+  inside the worker environment, and the named Wealthsimple adapter reads
+  positioned text locally. General PDF extraction, mapping, vision/OCR, or
+  local-model fallback remains Phase 4 work.
 - **Ask retention and logging:** questions, plans, evidence, results, prose, and
   conversation state are not persisted or logged. Responses are no-store and
   excluded from service-worker caching. Logs contain only request identity,
@@ -965,7 +987,9 @@ state, and immutable switch evidence under ADR-0008.
 **Phase 3 — Grounded Ask (in progress).**
 Versioned query DSL, bounded planner, strict validator, deterministic read-only
 executor, opaque-reference narration, local fallback, and an auditable Ask tab
-with no persistent conversation state.
+with no persistent conversation state. ADR-0011 also permits one targeted
+exception for the exact Wealthsimple chequing text-PDF layout, with local-only
+parsing and exact running-balance/statement-summary validation.
 
 **Phase 4 — Ingestion hardening + polish.**
 General PDF extraction (deterministic + governed fallback + local-model option),
@@ -982,7 +1006,9 @@ forecasts, offline hardening, and deployment polish.
 4. Use Frankfurter v2 for the cached FX feed.
 5. Use Anthropic first behind the provider interface, with minimized structured
    inputs and reviewed taxonomy changes per ADR-0003.
-6. Keep irregular-PDF AI extraction and local OCR/model work in Phase 4.
+6. Keep general irregular-PDF extraction, mapping, AI/vision, and local-model
+   work in Phase 4. The named I&M v1 and Wealthsimple chequing v1 adapters are
+   narrow, versioned exceptions with local parsing and exact reconciliation.
 7. Move imported-account net worth into Phase 1 per ADR-0004; manual assets and
    debts remain deferred.
 8. Keep Stage 1 reporting fixed to CAD; support stable CAD/TZS home reporting
@@ -997,6 +1023,12 @@ forecasts, offline hardening, and deployment polish.
     transaction containing one to three queries, and one opaque-reference
     narration call; do not expose schemas/results to models or persist Ask
     content, per ADR-0009.
+13. Accept the exact Wealthsimple chequing PDF fingerprint only for CAD asset
+    accounts, parse it locally, and fail closed unless all running balances and
+    printed summary evidence reconcile, per ADR-0011. Keep the private six-file
+    acceptance set outside version control. Its 2026-07-26 post-deployment
+    replay imported 76 rows across six reconciled statements, and the identical
+    repeat added zero rows while preserving the original terminal audit job.
 
 ---
 

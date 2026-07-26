@@ -10,6 +10,11 @@ All notable changes to Ledger are documented here.
   execution, and opaque-reference narration with fail-closed local fallback.
 - [ADR-0010] Fail-closed source freshness, stateless local entity-clarification
   tokens, and code-owned enforcement for canonical prohibited Ask intents.
+- [ADR-0011] Targeted, versioned support for the known Wealthsimple chequing
+  text-PDF layout through local positioned-text parsing, exact running-balance
+  and statement-summary reconciliation, printed page-sequence validation, and
+  fail-closed CAD asset-account validation. General unknown-PDF extraction
+  remains deferred to Phase 4.
 - The Phase 3 source-of-truth build plan covering supported Ask datasets,
   public outcomes, privacy boundaries, evidence rendering, performance, and
   release gates.
@@ -51,6 +56,10 @@ All notable changes to Ledger are documented here.
 - Extended analytics source watermarks through account/category/merchant label
   inputs and made Ask reject initial or mid-planning source drift rather than
   mixing mutable current rows with a published generation.
+- Made terminal import outcomes truthful and privacy-safe: unsupported PDFs are
+  described as needing format support rather than waiting for AI, terminal jobs
+  omit retry counters, and content-addressed PDFs use a short statement label
+  instead of exposing their full object key.
 
 ### Security
 
@@ -64,11 +73,14 @@ All notable changes to Ledger are documented here.
 - Ask is disabled independently by default, uses no-store responses, remains
   outside service-worker caches, enforces provider/request timeouts, and limits
   each web process to two concurrent requests.
+- Wealthsimple statement parsing remains entirely local and deterministic; the
+  private six-file acceptance set stays outside version control and no PDF
+  content or extracted evidence is sent to an external provider.
 
 ### Verification checkpoint
 
 - The local deterministic checkpoint passes 39 shared-contract tests, 155 web
-  server tests, 17 component tests, and 196 worker tests with one intentional
+  server tests, 20 component tests, and 215 worker tests with one intentional
   worker skip; the 10 opt-in PostgreSQL executor cases discover and skip cleanly
   when their dedicated database URL is absent.
 - TypeScript/Svelte checks report zero errors and warnings, Ruff and strict mypy
@@ -77,9 +89,13 @@ All notable changes to Ledger are documented here.
 - The disposable 100,000-transaction benchmark completes the analytics rebuild
   in `15.191s`, its slowest warm Ask read in `87.187ms`, and a three-query plan
   in `107.697ms`, within the `120s`, `1s`, and `2s` gates respectively.
-- Playwright discovers all 23 browser tests. Real PostgreSQL execution,
-  fresh-stack smoke, browser execution, and the opt-in live Anthropic run remain
+- Playwright executes all 24 browser tests successfully. Real PostgreSQL
+  execution, fresh-stack smoke, and the opt-in live Anthropic run remain
   required before Phase 3 can move to `in_review`.
+- The 2026-07-26 post-deployment Wealthsimple acceptance preserved the original
+  terminal audit job, imported 76 rows across six reconciled statements from a
+  fresh retained-object job, and proved idempotency when the identical repeat
+  added zero rows and skipped all 76 existing transactions.
 
 ## [Phase 2.1 — Configurable Home Currency] — 2026-07-25
 

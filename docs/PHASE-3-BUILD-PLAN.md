@@ -15,12 +15,19 @@ narration call can refer only to locally created opaque facts. Every answer
 includes auditable evidence and a normalized query view. Questions, answers,
 and conversation state are never persisted.
 
+ADR-0011 adds one bounded ingestion exception to this Ask-focused phase:
+deterministic local support for the known Wealthsimple chequing text-PDF
+layout. It does not advance general unknown-PDF extraction, OCR/model fallback,
+or mapping/review work from Phase 4.
+
 [ADR-0009](decisions/0009-bounded-tokenized-grounded-ask.md) is the governing
 Ask decision; [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md)
 refines source freshness, local clarification, and semantic fail-closed
-behavior. Phase 2 and the separately approved Phase 2.1 are completed historical
-baselines; their regression, reconciliation, currency-fencing, privacy, and
-performance guarantees remain permanent gates.
+behavior. [ADR-0011](decisions/0011-wealthsimple-chequing-pdf-v1.md) governs the
+targeted Wealthsimple adapter and truthful terminal import presentation. Phase
+2 and the separately approved Phase 2.1 are completed historical baselines;
+their regression, reconciliation, currency-fencing, privacy, and performance
+guarantees remain permanent gates.
 
 ## Sequenced Backlog
 
@@ -51,7 +58,10 @@ performance guarantees remain permanent gates.
 9. Add contract, database, privacy, provider-failure, component, browser,
    full-stack stub, adversarial, and performance coverage while preserving all
    earlier phase gates.
-10. Run the deterministic release suite and the one-time opt-in live Anthropic
+10. Add `wealthsimple_chequing_pdf_v1`, its sanitized deterministic fixtures,
+    and truthful privacy-safe terminal import presentation without changing
+    HTTP or database contracts.
+11. Run the deterministic release suite and the one-time opt-in live Anthropic
     acceptance gate. Move Phase 3 to `in_review` only after every gate passes.
 
 ## Public Interfaces
@@ -113,6 +123,32 @@ resolved ranges, typed evidence and table/chart hints, exact-decimal cells,
 market, home currency, analytics generation, threshold policy, source
 watermark, coverage, truncation, and freshness state. SQL, prompts, and provider
 payloads are never returned.
+
+## Targeted Wealthsimple PDF Exception
+
+- `wealthsimple_chequing_pdf_v1` runs before the generic PDF-table fallback and
+  matches only the known Wealthsimple chequing fingerprint for a CAD asset
+  account. Positioned PDF text is parsed locally with `pdfplumber`; no OCR,
+  external document service, or model receives PDF content.
+- The adapter parses the statement period, masked account reference,
+  opening/closing summary, repeated page headers, printed page counters,
+  booked/posted dates, wrapped descriptions, Unicode negative signs, signed
+  amounts, and running balances.
+- It writes no financial rows unless dates are in range, every signed amount
+  explains its running-balance transition, the transaction sum reconciles the
+  opening and printed closing balances, the final running balance equals the
+  summary, the printed page sequence matches the PDF page count, and no
+  transaction-like content remains unparsed. Zero activity is valid only when
+  opening equals closing and no transaction-like content exists.
+- A fingerprint miss continues to the existing generic PDF fallback; a matched
+  file with invalid or ambiguous financial evidence ends in a terminal
+  non-success outcome. General unknown/irregular PDF extraction, OCR/model
+  fallback, mapping approval, and schema-evolution replay remain Phase 4.
+- Existing HTTP/database contracts stay unchanged. Successful job details use
+  the existing `adapter` field; terminal `needs_ai` is presented as “Needs
+  format support” or “Needs attention,” terminal `done`/`needs_ai` jobs omit
+  retry counters, and content-addressed PDF keys render as privacy-safe labels
+  such as `PDF statement · …c99`.
 
 ## Deterministic and Privacy Boundaries
 
@@ -199,6 +235,14 @@ payloads are never returned.
 - Component and Playwright tests cover setup, submit/cancel/retry,
   clarification, follow-up/reset, evidence, query inspection, partial coverage,
   scope changes, responsiveness, and accessibility.
+- Wealthsimple adapter tests use sanitized two-page derivatives and cover
+  positive/negative amounts, Unicode minus, repeated headers, wrapped
+  descriptions, masked-reference and CAD asset-account validation, zero
+  activity, whole-page omission, fingerprint drift, malformed/ambiguous/missing
+  content, out-of-period dates, and every running-balance and summary mismatch.
+- Pipeline tests prove persistence and repeat-import idempotency; import UI
+  tests prove truthful terminal-state copy, hidden terminal retry counters, and
+  privacy-safe PDF labels without retaining original filenames.
 - A fresh-stack stub-provider smoke covers aggregate comparison, category
   drivers, recurring/finding evidence, FX evidence, transaction drill-down, a
   scoped follow-up, and unsupported SQL/write/forecast questions.
@@ -210,6 +254,10 @@ payloads are never returned.
 - `make ask-live-acceptance` is the opt-in live Anthropic run for canonical and
   adversarial prompts. It is a one-time manual gate before Phase 3 can move to
   `in_review`; CI always uses deterministic stubs.
+- The 2026-07-26 post-deployment acceptance queued a fresh job against the six
+  retained encrypted Wealthsimple object keys while preserving the earlier
+  terminal `needs_ai` job. All six statements reconciled to 76 imported rows;
+  the identical repeat added zero rows and skipped all 76.
 
 ## Out of Scope
 
@@ -219,12 +267,24 @@ prompt/result caching, budgets, investments, authentication, and multi-user
 tenancy remain outside Phase 3. The service remains loopback-bound, local,
 single-user, and read-only.
 
+General unknown-PDF extraction, OCR/model fallback beyond the existing named
+I&M adapter, manual format mapping/review, and safe replay after schema
+evolution remain Phase 4. ADR-0011's exact Wealthsimple layout is the only new
+Phase 3 PDF exception.
+
 ## Current State
 
 Phase 3 is `in_progress`. The contracts, executor, privacy boundary, API, UI,
-deterministic unit/component suites, production build, and performance gate are
-implemented. The real-PostgreSQL executor matrix is wired into the database CI
-job through `make test-ask-postgres`. Do not mark the phase `in_review` until a
-fresh-stack stub smoke, browser execution, the PostgreSQL gate, and the one-time
+deterministic unit/component/browser suites, production build, and performance
+gate are implemented. The real-PostgreSQL executor matrix is wired into the
+database CI job through `make test-ask-postgres`. Do not mark the phase
+`in_review` until a fresh-stack stub smoke, the PostgreSQL gate, and the one-time
 live Anthropic acceptance gate have all run successfully in their authorized
 environments.
+
+The ADR-0011 exception's deterministic adapter, pipeline, and import-UI coverage
+passes. Its private post-deployment acceptance completed on 2026-07-26: a fresh
+job against the retained encrypted objects imported 76 rows across six
+reconciled statements, the identical repeat added zero rows and skipped all 76,
+and the original terminal job was preserved for audit history. Phase 3 remains
+`in_progress` for the Ask gates above.

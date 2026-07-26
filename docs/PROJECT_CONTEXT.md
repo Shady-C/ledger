@@ -13,6 +13,9 @@ stored, reconciled, converted, aggregated, queried, and analyzed with
 deterministic code. Phase 3 adds a bounded natural-language Ask workflow over
 the completed market-scoped analytics without allowing a model to inspect the
 database, generate SQL, or calculate money.
+ADR-0011 also permits one targeted Phase 3 ingestion exception: deterministic,
+local support for the known Wealthsimple chequing text-PDF layout. It does not
+bring general unknown-PDF extraction or mapping into Phase 3.
 
 The detailed system design lives in [ARCHITECTURE.md](ARCHITECTURE.md). Preserve
 [BUILD-PLAN.md](BUILD-PLAN.md) as the Phase 0 baseline,
@@ -52,11 +55,17 @@ Phase 3 is complete when the local stack can:
 8. Meet the contract, database, privacy, adversarial, accessibility,
    regression, performance, fresh-stack stub, and one-time live-provider gates
    in the Phase 3 build plan.
+9. Parse the exact Wealthsimple chequing PDF v1 layout locally for CAD asset
+   accounts, fail closed on any page-sequence, date, row, running-balance, or
+   printed-summary inconsistency, and meet the six-file/76-row plus
+   zero-row-repeat acceptance target before recording that private replay as
+   passed.
 
 Forecasting, balances/net worth questions, import or reconciliation
 exploration, advice, writes, saved history, streaming, prompt/result caching,
-outbound notifications, authentication/multi-user tenancy, irregular-PDF AI
-extraction, investments, budgets, and manual assets or liabilities are outside
+outbound notifications, authentication/multi-user tenancy, general unknown-PDF
+extraction or mapping, OCR/model fallbacks beyond the existing named I&M
+adapter, investments, budgets, and manual assets or liabilities are outside
 Phase 3.
 
 ## Implementation State
@@ -118,6 +127,18 @@ freshness, local-only entity clarification, and code-owned prohibited-intent
 enforcement. No schema migration is planned because Ask state is not persisted.
 The implementation must remain `in_progress` until all Phase 3 deterministic
 gates and the one-time live Anthropic acceptance gate pass.
+
+ADR-0011 separately accepts `wealthsimple_chequing_pdf_v1` as a narrow Phase 3
+exception. The adapter recognizes the known Wealthsimple chequing fingerprint,
+requires a CAD asset account, reads positioned PDF text locally without OCR or
+an external model, and validates the printed page sequence, every
+running-balance transition, and the opening/closing summary before persistence.
+The six private source PDFs remain
+outside version control. On 2026-07-26, a fresh job using their retained
+encrypted object keys imported 76 rows across six reconciled statements; the
+identical repeat added zero rows and skipped all 76 existing transactions while
+the original terminal job remained intact for audit history. General
+unknown-PDF support remains Phase 4.
 
 ## Technology Stack
 
@@ -195,7 +216,7 @@ generation is bound to its home currency and frozen threshold-policy version.
 | 1 | Multi-bank, multi-currency, governed categorization, accounts, net worth | Completed 2026-07-24 |
 | 2 | Three-layer money, real TZS acceptance, market-scoped UX, deep analytics and Insights | Completed 2026-07-25 |
 | 2.1 | Stable CAD/TZS home reporting and currency-fenced analytics rebuilds | Completed separately 2026-07-25 |
-| 3 | Bounded grounded Ask workflow | In progress |
+| 3 | Bounded grounded Ask workflow plus the targeted Wealthsimple PDF v1 exception | In progress |
 | 4 | Ingestion hardening, adapter review/schema evolution, offline polish, forecasts | Not started |
 
 ## Key Design Decisions
@@ -233,6 +254,10 @@ generation is bound to its home currency and frozen threshold-policy version.
 - Fail closed on mutable source drift and keep database-derived clarification
   selections outside provider payloads per
   [ADR-0010](decisions/0010-fail-closed-ask-freshness-and-local-clarification.md).
+- Accept only the known Wealthsimple chequing text-PDF layout through local
+  positioned-text parsing and exact running-balance/summary checks, while
+  preserving general PDF extraction for Phase 4, per
+  [ADR-0011](decisions/0011-wealthsimple-chequing-pdf-v1.md).
 
 ## Environment and Data Safety
 
@@ -252,6 +277,9 @@ samples must be sanitized before they become fixtures. Ask's planner receives
 no schema, SQL, rows, results, or entity catalog, and its narrator receives
 only opaque fact references. No model receives complete statements, balances,
 analytics histories, raw transaction evidence, or finding calculations.
+Private Wealthsimple acceptance PDFs remain ignored local inputs; only
+sanitized layout derivatives may be committed. Their content is parsed locally
+and is never sent to a model or external document service.
 
 ## Working Agreements
 
