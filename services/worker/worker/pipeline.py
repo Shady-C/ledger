@@ -19,6 +19,7 @@ from worker.adapters import (
     ImBankTanzaniaPdfV1Adapter,
     OfxAdapter,
     PdfTableAdapter,
+    WealthsimpleChequingPdfV1Adapter,
 )
 from worker.adapters.base import Adapter, AdapterError
 from worker.categorize import categorize
@@ -64,6 +65,7 @@ class AdapterRegistry:
                 AmexXlsxAdapter(),
                 GenericCsvAdapter(),
                 GenericXlsxAdapter(),
+                WealthsimpleChequingPdfV1Adapter(),
                 ImBankTanzaniaPdfV1Adapter(),
                 PdfTableAdapter(),
             )
@@ -71,14 +73,19 @@ class AdapterRegistry:
         self.threshold = threshold
 
     def select(self, file: ParsedFile) -> Adapter:
-        scored = sorted(
-            ((adapter.detect(file), adapter) for adapter in self.adapters),
-            key=lambda item: item[0],
-            reverse=True,
-        )
-        if not scored or scored[0][0] < self.threshold:
+        top_score = 0.0
+        top_adapter: Adapter | None = None
+        for adapter in self.adapters:
+            score = adapter.detect(file)
+            if score > top_score:
+                top_score = score
+                top_adapter = adapter
+            # Named exact-layout adapters return 0.99. Once one has proven its
+            # fingerprint, do not run later expensive detectors such as OCR.
+            if score >= 0.99:
+                break
+        if top_adapter is None or top_score < self.threshold:
             raise UnsupportedStatementError(f"no deterministic adapter recognized {file.name!r}")
-        top_score, top_adapter = scored[0]
         LOGGER.info(
             "selected adapter",
             extra={"adapter": top_adapter.name, "confidence": top_score, "file": file.name},
